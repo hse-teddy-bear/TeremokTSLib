@@ -13,24 +13,25 @@ Structure is STR decomposition of time series: adding layers of models one by on
 import pandas as pd
 import numpy as np
 import pickle
+import os
 import optuna
 import itertools
 import logging
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import pandas.api.types as ptypes
 import statsmodels.api as sm
 from catboost import CatBoostRegressor
 from prophet import Prophet
 from prophet.make_holidays import make_holidays_df
 from sklearn.metrics import mean_squared_error
-from scipy.stats import pearsonr
-from statsmodels.tsa.stattools import pacf
 from statsmodels.tsa.deterministic import CalendarFourier
+from datetime import datetime
+
+from TeremokTSLib.itertest import optimization 
 
 
 # -----------------------------------------------------------------------
 # support methods
+
 
 def _check_spaces(data: pd.DataFrame) -> pd.Timestamp:
     """
@@ -72,7 +73,7 @@ def _interpolate_spaces(data: pd.DataFrame) -> pd.DataFrame:
             data.at[idx, 'consumption'] = mean_value
     return data
 
-def _calc_rolling_ewma(ts: pd.Series, window_size=60) -> pd.Series:
+def _calc_rolling_ewma(ts: pd.Series, window_size: int=60) -> pd.Series:
     """
     Calculate EWMA for each rolling window.
     """
@@ -102,7 +103,7 @@ def _train_prophet_model(
 
     # Setting threshholds for time series split (train set)
     unique_dates = sorted(data[date_col].unique())
-    train_threshold =  unique_dates[int(len(unique_dates) * 0.85)] #85%
+    train_threshold =  unique_dates[int(len(unique_dates) * 0.70)] #First 70% of data - train data
     train_data = data.loc[data[date_col] <= train_threshold]
 
     #detrending data
@@ -168,9 +169,10 @@ def _train_prophet_model(
     model.fit(train_data)
     return model
 
-def _show_pacf(time_series: list, 
-              nlags: int=30, 
-              alpha: float=0.1
+def _show_pacf(
+        time_series: list, 
+        nlags: int=30, 
+        alpha: float=0.1
     ) -> None:
     """
     Shows PACF function on lags of second residuals (for CatBoost layer).
@@ -185,6 +187,151 @@ def _show_pacf(time_series: list,
     plt.title(f'PACF on Residuals, lags={nlags}')
     plt.grid(True)
     plt.show()
+
+def _create_daily_lags(
+        df: pd.DataFrame, 
+        lag_columns_input: list, 
+        n_days: int=1, 
+        n_days_list: list=[], 
+        is_backwards: bool=True, 
+        continuous: bool=True,
+    ) -> pd.DataFrame:
+    """
+    Returns transformed dataframe with lag values of target.
+    """
+    if continuous:
+        for lag_column in lag_columns_input:
+            for i in range(1, n_days + 1):
+                if is_backwards == True:
+                    df[f'{lag_column}(T-{i})'] = df[lag_column].shift(periods=i)
+                elif is_backwards == False:
+                    df[f'{lag_column}(T+{i})'] = df[lag_column].shift(periods=-i)
+    elif continuous == False:
+        for lag_column in lag_columns_input:
+            for i in n_days_list:
+                if is_backwards == True:
+                    df[f'{lag_column}(T-{i})'] = df[lag_column].shift(periods=i)
+                elif is_backwards == False:
+                    df[f'{lag_column}(T+{i})'] = df[lag_column].shift(periods=-i)
+    return df
+
+def _preprocess_ts(
+        data: pd.DataFrame, 
+        target: str, 
+        n_lags_list: list, 
+        n_sma_list: list, 
+        fourier_order: int=1,
+        dropna: bool=True,
+    ) -> pd.DataFrame:
+    """
+    Preparing input (date, target) data for training autoregressive predictive model with lags and Fourier features.
+    """
+    # numerical features SMAs and daily lags
+    res = _create_daily_lags(df=data, lag_columns_input=[target], n_days_list=n_lags_list, continuous=False)
+    for sma_period in n_sma_list:
+        sma_name = f'SMA_{sma_period}d'
+        res[sma_name] = data[target].shift(1).rolling(window=sma_period, min_periods=sma_period).mean()
+    # date categorical features
+    res['is_weekend'] = np.select([(res.date.dt.weekday == 5) | (res.date.dt.weekday == 6)], [1], 0)
+    # date Fourier numerical features
+    cal_fourier_gen = CalendarFourier("y", fourier_order)
+    res = res.merge(cal_fourier_gen.in_sample(res['date']), left_on='date', right_on='date')
+    cal_fourier_gen = CalendarFourier("m", fourier_order)
+    res = res.merge(cal_fourier_gen.in_sample(res['date']), left_on='date', right_on='date')
+    cal_fourier_gen = CalendarFourier("w", fourier_order)
+    res = res.merge(cal_fourier_gen.in_sample(res['date']), left_on='date', right_on='date')
+    if dropna:
+        res = res.dropna().reset_index(drop=True)
+    return res
+
+def _train_catboost_model(
+        data: pd.DataFrame,
+        target_name: str, 
+        categorical_columns=[str],
+        n_trials=15,
+        loss='RMSE', 
+        verbose=False,
+    ) -> CatBoostRegressor:
+    """
+    Returns a trained CatBoostRegressor model.
+    """
+
+    if verbose == False:
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+    elif verbose == True:
+        optuna.logging.set_verbosity(optuna.logging.INFO)
+    else:
+        raise Exception('Verbose parameter can only be True or False')
+
+    # Splitting data into train, val, test
+    # Setting threshholds for time series split
+    unique_dates = sorted(data.date.unique())
+    train_threshold =  unique_dates[int(len(unique_dates) * 0.70)] #70%
+    val_threshold = unique_dates[int(len(unique_dates) * 0.85)] #15%
+
+    # Split data
+    train_data = data.loc[data.date <= train_threshold]
+    val_data = data.loc[(data.date > train_threshold) & (data.date <= val_threshold)]
+    test_data = data.loc[data.date > val_threshold]
+
+    # Create X, y
+    X_train, y_train = train_data.drop(columns=['date', target_name]), train_data[target_name]
+    X_val, y_val = val_data.drop(columns=['date', target_name]), val_data[target_name]
+    X_test, y_test = test_data.drop(columns=['date', target_name]), test_data[target_name]
+
+    # Optuna GPU hyperparameters optimizer
+    def objective(trial):
+        # Define hyperparameter search space
+        params = {
+            'iterations': trial.suggest_int('iterations', 100, 1500),
+            'depth': trial.suggest_int('depth', 2, 10),
+            'learning_rate': trial.suggest_loguniform('learning_rate', 0.01, 0.2),
+            'l2_leaf_reg': trial.suggest_loguniform('l2_leaf_reg', 1e-3, 10.0),
+            'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 1, 100),
+            'loss_function': loss,
+            'task_type': 'GPU'
+        }
+        # Initialize and train CatBoostRegressor
+        model = CatBoostRegressor(**params, cat_features=categorical_columns, verbose=0)
+        model.fit(X_train, y_train, 
+                    eval_set=[(X_val, y_val)], 
+                    early_stopping_rounds=30,
+                    verbose=False)
+        # Evaluate the model on test set
+        y_pred = model.predict(X_test)
+        rmse = mean_squared_error(y_test, y_pred, squared=False)
+        return rmse
+        
+    # Initialize Optuna study and optimize the objective function
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=n_trials)
+
+    # Best trial result
+    if verbose:
+        print(f"-- Best trial: RMSE = {study.best_value}, params = {study.best_params} --")
+
+    best_params = study.best_params
+    best_params['task_type'] = 'GPU'
+    best_model = CatBoostRegressor(**best_params, 
+                                   cat_features=categorical_columns,
+                                   verbose=0, 
+                                   random_seed=42)
+    best_model.fit(X_train, y_train, 
+                    eval_set=[(X_val, y_val)], 
+                    early_stopping_rounds=30,
+                    verbose=False)
+    return best_model
+
+def _get_slice(
+        data: pd.DataFrame,
+        start: float,
+        end: float
+    ) -> pd.DataFrame:
+    unique_dates = sorted(data.date.unique())
+    threshold_min =  unique_dates[int(len(unique_dates) * start)]
+    threshold_max =  unique_dates[int(len(unique_dates) * end)]
+    sliced_data = data.loc[(data.date >= threshold_min) & (data.date <= threshold_max)].reset_index()
+    return sliced_data
 
 
 # -----------------------------------------------------------------------
@@ -212,11 +359,19 @@ class Model:
     def train(
             self,
             data: pd.DataFrame,
-            catboost_params: list,
-            prophet_params: list,
+            k_coefficient: float=1,
+            days_till_perish: int=2,
+            goods_cost: float=1.0,
+            alpha_coefficient: float=1.0,
+            catboost_params: dict={},
+            prophet_params: dict={},
             ewma_length: int=10,
             interpolate_spaces: bool=True,
             holidays_df: pd.DataFrame=make_holidays_df(year_list=[1990 + i for i in range(40)], country='RU'),
+            n_lags_list: list=[1,2,3,7,14],
+            n_sma_list: list=[2,3],
+            fourier_order: int=3,
+            optuna_trials: int=15,
             show_residuals_pacf: int=0,
             save_model: bool=False,
     ) -> None:
@@ -324,16 +479,47 @@ class Model:
 
         
         # preparing training data for CatBoost
+        ts_for_training = _preprocess_ts(data=ts_for_training, 
+                                         target='residual',
+                                         n_lags_list=n_lags_list,
+                                         n_sma_list=n_sma_list,
+                                         fourier_order=fourier_order)
 
 
         # training CatBoost model (second layer) as Residual layer
-
+        cb_model = _train_catboost_model(data=ts_for_training, 
+                                         target_name='residual', 
+                                         categorical_columns=['is_weekend'],
+                                         n_trials=optuna_trials,
+                                         loss='RMSE')
+        self.catboost_model = cb_model
+        self.inference_cols = cb_model.feature_names_
+        self.is_trained = True
+        self.train_date = datetime.now()
 
 
         # beta coefficient optimization
+        validation_dataset = _get_slice(data, start=0.70, end=0.85)
+        validation_dataset.rename(columns={'consumption': 'cons'}, inplace=True)
+        validation_cb_dataset = _preprocess_ts(data=ts_for_training, 
+                                                target='residual',
+                                                n_lags_list=n_lags_list,
+                                                n_sma_list=n_sma_list,
+                                                fourier_order=fourier_order)
+        validation_cb_dataset.drop(columns=['date', 'residual'], inplace=True)
+        validation_cb_dataset = _get_slice(validation_cb_dataset, start=0.70, end=0.85)
+        validation_dataset['cons_pred'] = validation_dataset['trend'] + validation_dataset['seasonality'] + cb_model.predict(validation_cb_dataset)
+        validation_dataset.dropna(inplace=True)
+        initial_stock_assumption = np.percentile(validation_dataset['cons'], 85) * 1.5
+        best_beta = optimization._validate(data=validation_dataset,
+                                           initial_stock=initial_stock_assumption,
+                                           ewma_length=ewma_length,
+                                           k=k_coefficient,
+                                           lifetime_d=days_till_perish,
+                                           cost=goods_cost,
+                                           alpha=alpha_coefficient,)
+        self.beta_coefficient = best_beta
 
-        self.is_trained = True
-        self.train_date = '00-00-0000'
 
     def itertest(
             self,
@@ -350,6 +536,7 @@ class Model:
         """
         pass
 
+
     def predict_consumption(
             self,
             data: pd.DataFrame,
@@ -361,6 +548,7 @@ class Model:
         # checking if all input columns are present
         # getting consumption prediction 
         pass
+
 
     def predict_order(
             self,
@@ -384,10 +572,25 @@ class Model:
         # converting predicted consumption to order in boxes with k and beta coefficients
         pass
 
-    def view_inference_cols(
+
+    def view_cb_inference_cols(
             self,
     ) -> list:
         """
-        Returns a list of necessary columns for inference.
+        Returns a list of necessary columns for inference of only CatBoost model.
         """
         return self.inference_cols
+    
+
+    def save_model(
+            self, 
+            model_name: str='new_model',
+            foulder_name: str='saved_models',
+    ) -> None:
+        """
+        Saves selected ensemble model in pickle format.
+        """
+        if not os.path.exists(foulder_name):
+            os.mkdir(foulder_name)
+            with open(f'{foulder_name}/{model_name}.pkl', 'wb') as file:
+                pickle.dump(self, file)

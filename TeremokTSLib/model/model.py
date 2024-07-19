@@ -24,7 +24,7 @@ from prophet import Prophet
 from prophet.make_holidays import make_holidays_df
 from sklearn.metrics import mean_squared_error
 from statsmodels.tsa.deterministic import CalendarFourier
-from datetime import datetime
+from datetime import datetime, date
 
 from TeremokTSLib.itertest import optimization 
 
@@ -333,6 +333,77 @@ def _get_slice(
     sliced_data = data.loc[(data.date >= threshold_min) & (data.date <= threshold_max)].reset_index()
     return sliced_data
 
+def _add_lag_features(
+        input_df:pd.DataFrame,
+        data:pd.DataFrame, 
+        ewma_length:int, 
+        n_lags_list:list, 
+        prophet_model: Prophet,
+    ) -> pd.DataFrame:
+    """
+    This function adds columns of lags.
+    """
+    for lag_number in n_lags_list:
+        lag_feature_name = f"cons(T-{lag_number})"
+        raw_cons = data[lag_feature_name]
+        lag_ewma_name = f"ewma({ewma_length})(T-{lag_number})"
+        ewma_trend = data[lag_ewma_name]
+        lag_date = data['date'] - pd.DateOffset(days=lag_number+1)
+        lag_df = pd.DataFrame(data=[lag_date], columns=['ds'], index=list(range(0,len([lag_date]))))
+        prophet_seasonality = prophet_model.predict(lag_df)['additive_terms']
+        residual = raw_cons - ewma_trend - prophet_seasonality
+        input_df[f'residual(T-{lag_number+1})'] = [residual]
+    return input_df
+
+def _add_sma_features(
+        input_df:pd.DataFrame,
+        data:pd.DataFrame, 
+        feature_name:str, 
+        n_sma_list:list
+    ) -> pd.DataFrame:
+    """
+    This function adds columns of SMA of subsamples of lags.\n
+    Returns original dataset with added sma_n columns.
+    """
+    for sma_length in n_sma_list:
+        temp_df = pd.DataFrame()
+        for k in range(0, sma_length):
+            feature_name_index = f"{feature_name}(T-{k+1})" #format: residual(T-1)
+            temp_df[feature_name_index] = data[feature_name_index]
+        sma_value = temp_df.mean(axis=1)
+        input_df[f"SMA_{sma_length}d"] = sma_value
+    return input_df
+
+def _add_date_features(
+        input_df: pd.DataFrame,
+        data: pd.DataFrame,
+        fourier_order: int,
+        timedelta_days: int=1,
+    ) -> pd.DataFrame:
+    """
+    This function adds date feature columns to the left of existing single row in input dataframe.\n
+    Returns pandas dataframe with added date features.
+    """
+
+    df_to_add = data[['date']]
+    df_to_add['date'] = df_to_add['date'] + pd.Timedelta(days=timedelta_days)
+
+    # Weekend - Sat, Sun
+    df_to_add['is_weekend'] = np.select([(df_to_add.date.dt.weekday == 5) | (df_to_add.date.dt.weekday == 6)], [1], 0)
+
+    # Date Fourier numerical features
+    cal_fourier_gen = CalendarFourier("y", fourier_order)
+    df_to_add = df_to_add.merge(cal_fourier_gen.in_sample(df_to_add['date']), left_on='date', right_on='date')
+    cal_fourier_gen = CalendarFourier("m", fourier_order)
+    df_to_add = df_to_add.merge(cal_fourier_gen.in_sample(df_to_add['date']), left_on='date', right_on='date')
+    cal_fourier_gen = CalendarFourier("w", fourier_order)
+    df_to_add = df_to_add.merge(cal_fourier_gen.in_sample(df_to_add['date']), left_on='date', right_on='date')
+    
+    # adding day o input dataframe
+    df_to_add = df_to_add.drop(columns=['date'])
+    input_df = pd.concat([input_df, df_to_add], axis=1)
+    return input_df
+
 
 # -----------------------------------------------------------------------
 # Model class
@@ -349,6 +420,10 @@ class Model:
         self.inference_cols = list(),
         self.is_trained = False,
         self.train_date = str(),
+        self.n_lags_list = list(),
+        self.n_sma_list = list(),
+        self.ewma_length = int,
+        self.fourier_order = int,
 
     def __str__(self) -> str:
         return '<TeremokTSLib Model>'
@@ -368,7 +443,7 @@ class Model:
             ewma_length: int=10,
             interpolate_spaces: bool=True,
             holidays_df: pd.DataFrame=make_holidays_df(year_list=[1990 + i for i in range(40)], country='RU'),
-            n_lags_list: list=[1,2,3,7,14],
+            n_lags_list: list=[1,2,3],
             n_sma_list: list=[2,3],
             fourier_order: int=3,
             optuna_trials: int=15,
@@ -432,6 +507,10 @@ class Model:
 
         # checking input daily data for sortedness
         data = data.sort_values(by='date').reset_index(drop=True)
+        self.n_lags_list = n_lags_list
+        self.n_sma_list = n_sma_list
+        self.ewma_length = ewma_length
+        self.fourier_order = fourier_order
 
 
         # checking input daily time series data for missing dates (spaces)
@@ -494,6 +573,7 @@ class Model:
                                          loss='RMSE')
         self.catboost_model = cb_model
         self.inference_cols = cb_model.feature_names_
+        self.inference_cols.append('date')
         self.is_trained = True
         self.train_date = datetime.now()
 
@@ -510,7 +590,7 @@ class Model:
         validation_cb_dataset = _get_slice(validation_cb_dataset, start=0.70, end=0.85)
         validation_dataset['cons_pred'] = validation_dataset['trend'] + validation_dataset['seasonality'] + cb_model.predict(validation_cb_dataset)
         validation_dataset.dropna(inplace=True)
-        initial_stock_assumption = np.percentile(validation_dataset['cons'], 85) * 1.5
+        initial_stock_assumption = np.percentile(validation_dataset['cons'], 85) * 1.5 #TODO: assert this later
         best_beta = optimization._validate(data=validation_dataset,
                                            initial_stock=initial_stock_assumption,
                                            ewma_length=ewma_length,
@@ -542,18 +622,47 @@ class Model:
             data: pd.DataFrame,
     ) -> list:
         """
-        Returns predicted consumption on day T+1 (prediction day)
+        Returns predicted consumption for each row for day T+1 (tomorrow).
         """
 
         # checking if all input columns are present
-        # getting consumption prediction 
-        pass
+        for needed_col in self.inference_cols:
+            if needed_col not in data.columns:
+                raise ValueError(f"Input data must contain all necessary columns for inference.\n 
+                                 In your case: {", ".join(self.inference_cols)}")
+        
+        output = []
+        # trend layer
+        trend = data[f'ewma({self.ewma_length})(T+1)']
+        # seasonality layer
+        data['date'] = pd.to_datetime(data['date']) #TODO: rework this later
+        tmr_dates = data['date'] + pd.DateOffset(days=1)
+        fb_inference_data = pd.DataFrame(data=[tmr_dates], columns=['ds'], index=list(range(0, data.shape[0])))
+        seasonality = self.prophet_model.predict(fb_inference_data)['additive_terms']
+        # residual layer
+        cb_inference_df = pd.DataFrame()
+        cb_inference_df = _add_lag_features(input_df=cb_inference_df,
+                                            data=data,
+                                            ewma_length=self.ewma_length,
+                                            n_lags_list=self.n_lags_list,
+                                            prophet_model=self.prophet_model)
+        cb_inference_df = _add_sma_features(input_df=cb_inference_df,
+                                            data=data,
+                                            feature_name='residual',
+                                            n_sma_list=self.n_sma_list)
+        cb_inference_df = _add_date_features(input_df=cb_inference_df,
+                                             data=data,
+                                             fourier_order=self.fourier_order,
+                                             timedelta_days=1)
+        residual = self.catboost_model.predict(cb_inference_df)
+        # final output calculation
+        output = trend + seasonality + residual
+        return output
 
 
     def predict_order(
             self,
             data: pd.DataFrame,
-            k_coef: int=1,
     ) -> list:
         """
         Returns recommended orders on day T+1 (prediction day) based on forcasted consumption on day T+1.
@@ -568,9 +677,35 @@ class Model:
         """
 
         # checking if all input columns are present
+        must_have_cols = ['stock_left', 'k_coef']
+        must_have_cols.extend(self.inference_cols)
+        for needed_col in must_have_cols:
+            if needed_col not in data.columns:
+                raise ValueError(f"Input data must contain all necessary columns for inference.\n 
+                                 In your case: {", ".join(must_have_cols)}")
+            
         # getting consumption prediction 
-        # converting predicted consumption to order in boxes with k and beta coefficients
-        pass
+        cons_pred = np.array(self.predict_consumption(data=data))
+        cons_pred[cons_pred < 0] = 0 # preventer of boosing negative output
+        # converting predicted consumption to order in boxes with k and beta coefficient
+        mean_cons = np.array(data[f"ewma({self.ewma_length})(T+1)"])
+        y_adj = np.maximum((cons_pred + 0.85 * mean_cons), (cons_pred * self.beta_coefficient * (1 - ((cons_pred - mean_cons) / mean_cons) ** 2)))
+        y_adj_to_order = np.round(y_adj - np.array(data["stock_left"])) 
+        y_adj_to_order[y_adj_to_order < 0] = 0 # preventer of negative order if some server data mistake occurs
+        y_box_adj_to_order = np.round(y_adj_to_order / np.array(data["k_coef"]))
+        return y_box_adj_to_order
+
+        # EXAMPLE:
+        #"stock_left": 30,
+        #"k_koef": 5,
+        #"date"
+        #"cons(T-0)": 23.0,
+        #"cons(T-1)": 26.0,
+        #"cons(T-2)": 23.0,
+        #"ewma(10)(T+1)": 23.0,
+        #"ewma(10)(T-0)": 21.0,
+        #"ewma(10)(T-1)": 21.0,
+        #"ewma(10)(T-2)": 21.0,
 
 
     def view_cb_inference_cols(

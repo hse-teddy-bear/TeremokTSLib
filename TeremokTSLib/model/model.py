@@ -10,6 +10,9 @@ Structure is STR decomposition of time series: adding layers of models one by on
 # dependencies
 
 
+import warnings
+warnings.filterwarnings('ignore')
+
 import pandas as pd
 import numpy as np
 import pickle
@@ -23,6 +26,7 @@ from catboost import CatBoostRegressor
 from prophet import Prophet
 from prophet.make_holidays import make_holidays_df
 from sklearn.metrics import mean_squared_error
+from sklearn.metrics import root_mean_squared_error
 from statsmodels.tsa.deterministic import CalendarFourier
 from datetime import datetime, date
 
@@ -137,7 +141,7 @@ def _train_prophet_model(
 
             y_pred = m.predict(train_data[['ds']])['yhat']
             y_real = train_data['y']
-            rmse_metric = mean_squared_error(y_real, y_pred, squared=False)
+            rmse_metric = root_mean_squared_error(y_real, y_pred)
             rmses.append(rmse_metric)
         # Find the best parameters
         tuning_results = pd.DataFrame(all_params)
@@ -285,8 +289,8 @@ def _train_catboost_model(
         params = {
             'iterations': trial.suggest_int('iterations', 100, 1500),
             'depth': trial.suggest_int('depth', 2, 10),
-            'learning_rate': trial.suggest_loguniform('learning_rate', 0.01, 0.2),
-            'l2_leaf_reg': trial.suggest_loguniform('l2_leaf_reg', 1e-3, 10.0),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
+            'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1e-3, 10.0, log=True),
             'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 1, 100),
             'loss_function': loss,
             'task_type': 'GPU'
@@ -299,7 +303,7 @@ def _train_catboost_model(
                     verbose=False)
         # Evaluate the model on test set
         y_pred = model.predict(X_test)
-        rmse = mean_squared_error(y_test, y_pred, squared=False)
+        rmse = root_mean_squared_error(y_test, y_pred)
         return rmse
         
     # Initialize Optuna study and optimize the objective function
@@ -330,7 +334,7 @@ def _get_slice(
     unique_dates = sorted(data.date.unique())
     threshold_min =  unique_dates[int(len(unique_dates) * start)]
     threshold_max =  unique_dates[int(len(unique_dates) * end)]
-    sliced_data = data.loc[(data.date >= threshold_min) & (data.date <= threshold_max)].reset_index()
+    sliced_data = data.loc[(data.date >= threshold_min) & (data.date <= threshold_max)].reset_index(drop=True)
     return sliced_data
 
 def _add_lag_features(
@@ -344,15 +348,16 @@ def _add_lag_features(
     This function adds columns of lags.
     """
     for lag_number in n_lags_list:
+        lag_number = lag_number - 1
         lag_feature_name = f"cons(T-{lag_number})"
         raw_cons = data[lag_feature_name]
         lag_ewma_name = f"ewma({ewma_length})(T-{lag_number})"
         ewma_trend = data[lag_ewma_name]
-        lag_date = data['date'] - pd.DateOffset(days=lag_number+1)
-        lag_df = pd.DataFrame(data=[lag_date], columns=['ds'], index=list(range(0,len([lag_date]))))
+        lag_date = list(data['date'] - pd.DateOffset(days=lag_number+1))
+        lag_df = pd.DataFrame(data=lag_date, columns=['ds'], index=list(range(0, len(lag_date))))
         prophet_seasonality = prophet_model.predict(lag_df)['additive_terms']
         residual = raw_cons - ewma_trend - prophet_seasonality
-        input_df[f'residual(T-{lag_number+1})'] = [residual]
+        input_df[f'residual(T-{lag_number+1})'] = residual.values
     return input_df
 
 def _add_sma_features(
@@ -410,6 +415,9 @@ def _add_date_features(
 
 
 class Model:
+    """
+    Key class in TeremokTSLib. Model is a packaged ensemble of Prophet, CatBoost and other methods for training on daily consumption data.
+    """
 
     def __init__(
             self, 
@@ -466,10 +474,10 @@ class Model:
         if not isinstance(data, pd.DataFrame):
             raise ValueError(f"data must be a pandas DataFrame. Provided type: {type(data)}")
         
-        if not isinstance(catboost_params, list):
+        if not isinstance(catboost_params, dict):
             raise ValueError(f"catboost_params must be a list. Provided type: {type(catboost_params)}")
         
-        if not isinstance(prophet_params, list):
+        if not isinstance(prophet_params, dict):
             raise ValueError(f"prophet_params must be a list. Provided type: {type(prophet_params)}")
         
         if not isinstance(ewma_length, int):
@@ -527,6 +535,7 @@ class Model:
         if interpolate_spaces == True and is_continuous == False:
             data = _add_missing_dates(data)
             data = _interpolate_spaces(data)
+            print('Interpolation finished successfully!')
         elif interpolate_spaces == False and is_continuous == False:
             raise Warning("Interpolation was switched off! Data should be continuous for correct training process.")
 
@@ -538,6 +547,7 @@ class Model:
 
 
         # getting first residual and training Prophet model (first layer) as Seasonality layer
+        print('Started training Prophet model...')
         fb_model = _train_prophet_model(data=data,
                                         date_col='date',
                                         target_col='consumption',
@@ -558,7 +568,7 @@ class Model:
 
         
         # preparing training data for CatBoost
-        ts_for_training = _preprocess_ts(data=ts_for_training, 
+        ts_for_training_cb = _preprocess_ts(data=ts_for_training, 
                                          target='residual',
                                          n_lags_list=n_lags_list,
                                          n_sma_list=n_sma_list,
@@ -566,14 +576,20 @@ class Model:
 
 
         # training CatBoost model (second layer) as Residual layer
-        cb_model = _train_catboost_model(data=ts_for_training, 
+        print('Started training CatBoost model...')
+        cb_model = _train_catboost_model(data=ts_for_training_cb, 
                                          target_name='residual', 
                                          categorical_columns=['is_weekend'],
                                          n_trials=optuna_trials,
                                          loss='RMSE')
         self.catboost_model = cb_model
-        self.inference_cols = cb_model.feature_names_
-        self.inference_cols.append('date')
+        selected_inf_cols = []
+        selected_inf_cols.extend(['date'])
+        selected_inf_cols.append(f'ewma({self.ewma_length})(T+1)')
+        for i in self.n_lags_list:
+            selected_inf_cols.append(f'ewma({self.ewma_length})(T-{i-1})')
+            selected_inf_cols.append(f'cons(T-{i-1})')
+        self.inference_cols = selected_inf_cols
         self.is_trained = True
         self.train_date = datetime.now()
 
@@ -585,9 +601,10 @@ class Model:
                                                 target='residual',
                                                 n_lags_list=n_lags_list,
                                                 n_sma_list=n_sma_list,
-                                                fourier_order=fourier_order)
-        validation_cb_dataset.drop(columns=['date', 'residual'], inplace=True)
+                                                fourier_order=fourier_order,
+                                                dropna=False)
         validation_cb_dataset = _get_slice(validation_cb_dataset, start=0.70, end=0.85)
+        validation_cb_dataset.drop(columns=['date', 'residual'], inplace=True)
         validation_dataset['cons_pred'] = validation_dataset['trend'] + validation_dataset['seasonality'] + cb_model.predict(validation_cb_dataset)
         validation_dataset.dropna(inplace=True)
         initial_stock_assumption = np.percentile(validation_dataset['cons'], 85) * 1.5 #TODO: assert this later
@@ -599,6 +616,7 @@ class Model:
                                            cost=goods_cost,
                                            alpha=alpha_coefficient,)
         self.beta_coefficient = best_beta
+        print('Training finished successfully!')
 
 
     def itertest(
@@ -628,17 +646,18 @@ class Model:
         # checking if all input columns are present
         for needed_col in self.inference_cols:
             if needed_col not in data.columns:
-                raise ValueError(f"Input data must contain all necessary columns for inference.\n 
-                                 In your case: {", ".join(self.inference_cols)}")
+                usercase = ', '.join(self.inference_cols)
+                raise ValueError(f"Input data must contain all necessary columns for inference. In your case: {usercase}")
         
         output = []
         # trend layer
         trend = data[f'ewma({self.ewma_length})(T+1)']
         # seasonality layer
         data['date'] = pd.to_datetime(data['date']) #TODO: rework this later
-        tmr_dates = data['date'] + pd.DateOffset(days=1)
-        fb_inference_data = pd.DataFrame(data=[tmr_dates], columns=['ds'], index=list(range(0, data.shape[0])))
-        seasonality = self.prophet_model.predict(fb_inference_data)['additive_terms']
+        tmr_dates = list(data['date'] + pd.DateOffset(days=1))
+        fb_inference_data = pd.DataFrame(data=tmr_dates, columns=['ds'], index=list(range(0, data.shape[0])))
+        seasonality = self.prophet_model.predict(fb_inference_data)
+        seasonality = seasonality['additive_terms']
         # residual layer
         cb_inference_df = pd.DataFrame()
         cb_inference_df = _add_lag_features(input_df=cb_inference_df,
@@ -647,7 +666,7 @@ class Model:
                                             n_lags_list=self.n_lags_list,
                                             prophet_model=self.prophet_model)
         cb_inference_df = _add_sma_features(input_df=cb_inference_df,
-                                            data=data,
+                                            data=cb_inference_df,
                                             feature_name='residual',
                                             n_sma_list=self.n_sma_list)
         cb_inference_df = _add_date_features(input_df=cb_inference_df,
@@ -681,8 +700,8 @@ class Model:
         must_have_cols.extend(self.inference_cols)
         for needed_col in must_have_cols:
             if needed_col not in data.columns:
-                raise ValueError(f"Input data must contain all necessary columns for inference.\n 
-                                 In your case: {", ".join(must_have_cols)}")
+                usercase = ', '.join(must_have_cols)
+                raise ValueError(f"Input data must contain all necessary columns for inference. In your case: {usercase}")
             
         # getting consumption prediction 
         cons_pred = np.array(self.predict_consumption(data=data))
@@ -694,18 +713,6 @@ class Model:
         y_adj_to_order[y_adj_to_order < 0] = 0 # preventer of negative order if some server data mistake occurs
         y_box_adj_to_order = np.round(y_adj_to_order / np.array(data["k_coef"]))
         return y_box_adj_to_order
-
-        # EXAMPLE:
-        #"stock_left": 30,
-        #"k_koef": 5,
-        #"date"
-        #"cons(T-0)": 23.0,
-        #"cons(T-1)": 26.0,
-        #"cons(T-2)": 23.0,
-        #"ewma(10)(T+1)": 23.0,
-        #"ewma(10)(T-0)": 21.0,
-        #"ewma(10)(T-1)": 21.0,
-        #"ewma(10)(T-2)": 21.0,
 
 
     def view_cb_inference_cols(

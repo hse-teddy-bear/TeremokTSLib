@@ -1,4 +1,6 @@
 """
+Support
+---------
 Support functions for ensemble model class.
 """
 

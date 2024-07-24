@@ -1,1 +1,1 @@
-#work in progress
+from TeremokTSLib.model.model import Model

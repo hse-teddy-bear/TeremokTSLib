@@ -94,7 +94,7 @@ def _plot_results(
     plt.bar(data['date'], data['stop_sale'], label='Sale stops', color='red')
     plt.hlines(y=0, xmin=data.date.min(), xmax=data.date.max(), color='grey', linewidth=2, linestyle='dashed')
     plt.legend()
-    plt.suptitle(f'Results on test set (last 15%), {model.name}', fontsize=28)
+    plt.suptitle(f'Itertest results on given data, {model.name}', fontsize=18)
     plt.title(f'Stop sales: {stop_sale}; Write offs: {write_off}\n' + f'beta: {model.beta}', fontsize=18, loc='right')
     plt.xlabel('Date', fontsize=14)
     plt.ylabel('stock(beggining of the day) - cons(day)', fontsize=14)
@@ -147,7 +147,7 @@ def _simulate(
     loss = model.cost * (model.alpha * stop_sale + write_off)
     sum_cons = data['cons'].sum()
     if plot:
-        _plot_results(data, model, write_off, stop_sale, model_order_q, save_results)
+        _plot_results(data, model, write_off, stop_sale, save_results)
     return write_off, stop_sale, loss, model_order_q, sum_cons
 
 def _validate(data: pd.DataFrame,

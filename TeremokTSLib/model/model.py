@@ -30,7 +30,7 @@ from sklearn.metrics import root_mean_squared_error
 from statsmodels.tsa.deterministic import CalendarFourier
 from datetime import datetime, date
 
-from TeremokTSLib.itertest import optimization 
+from TeremokTSLib.itertest import optimization
 
 
 # -----------------------------------------------------------------------
@@ -89,6 +89,27 @@ def _calc_rolling_ewma(ts: pd.Series, window_size: int=60) -> pd.Series:
         ewma_value = window.ewm(span=window_size, min_periods=window_size).mean().iloc[-1]
         ewma_rolling = pd.concat([ewma_rolling, pd.Series(ewma_value, index=[i+window_size])])
     return ewma_rolling
+
+def _calculate_lagged_consumption_and_ewma(
+        df: pd.DataFrame, 
+        n_lags_list: list, 
+        ewma_length: int
+    ) -> pd.DataFrame:
+    """
+    Prepares dataset for stresstest. Returns a prepd dataframe.
+    """
+    # Ensure the dataframe is sorted by date
+    df = df.sort_values(by='date').reset_index(drop=True)
+    # Calculate EWMA for the current day (T+1)
+    df[f'ewma({ewma_length})(T+1)'] = _calc_rolling_ewma(df['consumption'], window_size=ewma_length)
+    # Add lagged consumption columns and calculate EWMA for each lag
+    for lag in n_lags_list:
+        shifted_cons = df['consumption'].shift(lag)
+        lag_col = f'cons(T-{lag-1})'
+        ewma_col = f'ewma({ewma_length})(T-{lag-1})'
+        df[ewma_col] = _calc_rolling_ewma(shifted_cons, window_size=ewma_length)
+        df[lag_col] = shifted_cons
+    return df
 
 def _train_prophet_model(
         data: pd.DataFrame, 
@@ -619,22 +640,6 @@ class Model:
         print('Training finished successfully!')
 
 
-    def itertest(
-            self,
-            data: pd.DataFrame,
-            days_till_perish: int=2,
-            alpha_coefficient: int=4,
-    ) -> float:
-        """
-        Returns result of stress-testing trained model in format of weighted loss metric.
-        Formula: loss_metric = write_off_count + sale_stop_count * alpha_coefficient.
-        Increase alpha_coefficient parameter if you want penalty for sale_stops to increase.
-        
-        By default alpha_coefficient is 4.
-        """
-        pass
-
-
     def predict_consumption(
             self,
             data: pd.DataFrame,
@@ -676,7 +681,7 @@ class Model:
         residual = self.catboost_model.predict(cb_inference_df)
         # final output calculation
         output = trend + seasonality + residual
-        return output
+        return np.round(np.array(output), 2)
 
 
     def predict_order(
@@ -719,10 +724,82 @@ class Model:
             self,
     ) -> list:
         """
-        Returns a list of necessary columns for inference of only CatBoost model.
+        Returns a list of necessary columns for inference of only CatBoost model. 
+        Note: for Prophet only date and consumption columns are needed.
         """
         return self.inference_cols
     
+
+    def _stresstest(
+            self, 
+            init_stock_left: float,
+            data: pd.DataFrame,
+            plot: bool=True,
+    ) -> pd.DataFrame:
+        """
+        Simulates the workflow of automatic order on given data. Iteratively calculates orders and stocks on the spot. 
+        Returns dataframe with results and (optionally) a plot.
+        """
+
+        # calculate cons and ewma for each day from data (date, consumption)
+        prepd_data = _calculate_lagged_consumption_and_ewma(df=data, n_lags_list=self.n_lags_list, ewma_length=self.ewma_length)
+        real_consumption = prepd_data['consumption']
+        prepd_data.drop(columns=['consumption'], inplace=True)
+        prepd_data.dropna(inplace=True)
+
+        # start from init_stock_left and create orders
+        return "Work in progress. Method is not realised yet."
+
+
+    def itertest(
+            self,
+            test_data: pd.DataFrame,
+            initial_stock_left: float,
+            k_coefficient: int=1,
+            lifetime_d: int=2,
+            cost: float=1,
+            alpha: float=4,
+            save_results=False, 
+            plot=True
+    ) -> list:
+        """
+        Simulates the workflow of automatic order on given data. Iteratively calculates orders and stocks on the spot. 
+        Returns dataframe with results and (optionally) a plot.        
+        """
+
+        # calculate cons and ewma for each day from data (date, consumption)
+        prepd_data = _calculate_lagged_consumption_and_ewma(df=test_data, n_lags_list=self.n_lags_list, ewma_length=self.ewma_length)
+        prepd_data.dropna(inplace=True)
+        prepd_data.reset_index(drop=True, inplace=True)
+        real_consumption = list(prepd_data['consumption'])
+        prepd_data.drop(columns=['consumption'], inplace=True)
+
+        # create predictions of consumption for each day
+        if self.is_trained:
+            cons_pred = self.predict_consumption(data=prepd_data)
+        else:
+            raise Exception("Your model is not trained. Train it first, then use itertest method.")
+
+        # create opt_test_data = (date, cons, cons_pred)
+        opt_test_data = pd.DataFrame()
+        opt_test_data['date'] = prepd_data['date']
+        opt_test_data['cons'] = real_consumption
+        opt_test_data['cons_pred'] = cons_pred
+
+        # proceeding to itertest
+        model = optimization.EnsembleModel(k=k_coefficient, 
+                                            lifetime_d=lifetime_d, 
+                                            beta=self.beta_coefficient,
+                                            alpha=alpha,
+                                            cost=cost,)
+        write_off, stop_sale, loss, model_order_q, sum_loss = optimization._simulate(data=opt_test_data, 
+                                                                                        model=model, 
+                                                                                        initial_stock=initial_stock_left, 
+                                                                                        ewma_length=self.ewma_length, 
+                                                                                        save_results=save_results, 
+                                                                                        plot=plot)
+        return [write_off, stop_sale, loss, model_order_q, sum_loss]
+
 
     def save_model(
             self, 

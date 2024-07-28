@@ -1,4 +1,4 @@
-![ICON](./ICON.png)
+![Icon](./assets/github_icon.png)
 
 # What is this Library about?
 Easy-to-use (4 lines of code, actually) framework for training powerful predictive models!

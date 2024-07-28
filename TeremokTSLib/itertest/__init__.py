@@ -1,1 +1,3 @@
-from TeremokTSLib.itertest.optimization import OrderModel, EnsembleModel
+from .optimization import OrderModel, EnsembleModel
+
+__all__ = ['OrderModel', 'EnsembleModel']

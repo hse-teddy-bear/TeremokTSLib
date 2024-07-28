@@ -1,6 +1,11 @@
 Change Log
 ==========
 
-0.0.1 (28.07.2024)
+0.1.0 (27.07.2024)
 ------------------
 - First release
+
+1.1.0 (28.07.2024)
+------------------
+- Beta verison release
+- Visualisation of itertest added

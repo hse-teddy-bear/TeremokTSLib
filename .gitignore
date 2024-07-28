@@ -1,1 +1,4 @@
 model_test.ipynb
+
+__pycache__/
+*.py[cod]

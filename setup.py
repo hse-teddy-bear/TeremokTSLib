@@ -8,10 +8,10 @@ classifiers = [
  
 setup(
   name='TeremokTSLib',
-  version='1.1.0',
+  version='1.1.1',
   description='Easy-to-use box ML solution for forcasting consumption',
 
-  long_description=open('README.txt').read() + '\n\n' + open('CHANGELOG.txt').read(),
+  long_description=open('README.md').read() + '\n\n' + open('CHANGELOG.txt').read(),
   long_description_content_type="text/markdown",
   url='https://teremok.ru/',  
   author='Alexander Nikitin',

@@ -813,3 +813,6 @@ class Model:
             os.mkdir(foulder_name)
             with open(f'{foulder_name}/{model_name}.pkl', 'wb') as file:
                 pickle.dump(self, file)
+        else:
+            with open(f'{foulder_name}/{model_name}.pkl', 'wb') as file:
+                pickle.dump(self, file)       

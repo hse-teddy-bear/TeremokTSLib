@@ -29,6 +29,7 @@ from sklearn.metrics import mean_squared_error
 from sklearn.metrics import root_mean_squared_error
 from statsmodels.tsa.deterministic import CalendarFourier
 from datetime import datetime, date
+from joblib import Parallel, delayed
 
 from TeremokTSLib.itertest import optimization
 
@@ -118,6 +119,7 @@ def _train_prophet_model(
         trend_col: str, 
         holidays: pd.DataFrame,
         is_tuning: bool=False,
+        fb_njobs: int=1,
     ) -> Prophet:
     """
     Returns a trained Prophet model on given time series data.
@@ -148,8 +150,8 @@ def _train_prophet_model(
         all_params = [dict(zip(param_grid.keys(), v)) for v in itertools.product(*param_grid.values())]
         rmses = []  # Store the RMSEs for each params here
 
-        # Use cross validation to evaluate all parameters
-        for params in all_params:
+        # Use gridsearch to evaluate all parameters
+        def gridsearch(params):
             m = Prophet(**params, 
                         growth='flat',
                         holidays=holidays, 
@@ -157,16 +159,20 @@ def _train_prophet_model(
                         yearly_seasonality=False)
             m.add_seasonality(name='weekly', period=7, fourier_order=4)
             m.add_seasonality(name='monthly', period=30, fourier_order=4)
-            # m.add_seasonality(name='yearly', period=365, fourier_order=4) <-- yearly trend is deprecated, as short-term trend captures it
             m.fit(train_data)
 
             y_pred = m.predict(train_data[['ds']])['yhat']
             y_real = train_data['y']
             rmse_metric = root_mean_squared_error(y_real, y_pred)
-            rmses.append(rmse_metric)
+            return rmse_metric
+
+        # Parallel training
+        rmses = Parallel(n_jobs=fb_njobs)(delayed(gridsearch)(params) for params in all_params)
+
         # Find the best parameters
         tuning_results = pd.DataFrame(all_params)
         tuning_results['rmse'] = rmses
+
         # Initialize the Prophet model
         best_cps = tuning_results.sort_values(by='rmse').iloc[0]['changepoint_prior_scale']
         best_sps = tuning_results.sort_values(by='rmse').iloc[0]['seasonality_prior_scale']
@@ -476,6 +482,7 @@ class Model:
             n_sma_list: list=[2,3],
             fourier_order: int=3,
             optuna_trials: int=15,
+            fb_njobs: int=1,
             show_residuals_pacf: int=0,
             save_model: bool=False,
     ) -> None:
@@ -509,6 +516,9 @@ class Model:
         
         if not isinstance(show_residuals_pacf, int):
             raise ValueError(f"show_residuals_pacf must be a integer. Provided type: {type(show_residuals_pacf)}")
+        
+        if not isinstance(fb_njobs, int):
+            raise ValueError(f"fb_njobs must be a integer. Provided type: {type(fb_njobs)}")
         
         if not isinstance(save_model, bool):
             raise ValueError(f"save_model must be a boolean. Provided type: {type(save_model)}")
@@ -574,7 +584,8 @@ class Model:
                                         target_col='consumption',
                                         trend_col='trend',
                                         holidays=holidays_df,
-                                        is_tuning=True)
+                                        is_tuning=True,
+                                        fb_njobs=fb_njobs)
         self.prophet_model = fb_model
 
 

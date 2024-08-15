@@ -8,7 +8,7 @@ classifiers = [
  
 setup(
   name='TeremokTSLib',
-  version='1.1.2',
+  version='1.1.3',
   description='Easy-to-use box ML solution for forcasting consumption',
 
   long_description=open('README.md').read() + '\n\n' + open('CHANGELOG.txt').read(),

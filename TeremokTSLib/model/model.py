@@ -282,6 +282,7 @@ def _train_catboost_model(
         n_trials=15,
         loss='RMSE', 
         verbose=False,
+        show_descent_graph=False,
     ) -> CatBoostRegressor:
     """
     Returns a trained CatBoostRegressor model.
@@ -336,6 +337,9 @@ def _train_catboost_model(
     # Initialize Optuna study and optimize the objective function
     study = optuna.create_study(direction='minimize')
     study.optimize(objective, n_trials=n_trials)
+    if show_descent_graph:
+        fig = optuna.visualization.plot_optimization_history(study)
+        fig.show()
 
     # Best trial result
     if verbose:
@@ -372,7 +376,7 @@ def _add_lag_features(
         prophet_model: Prophet,
     ) -> pd.DataFrame:
     """
-    This function adds columns of lags.
+    This function adds columns of lags. Parallel computation is not supported.
     """
     for lag_number in n_lags_list:
         lag_number = lag_number - 1
@@ -484,6 +488,7 @@ class Model:
             optuna_trials: int=15,
             fb_njobs: int=1,
             show_residuals_pacf: int=0,
+            show_descent_graph: bool=False,
             save_model: bool=False,
     ) -> None:
         """
@@ -519,6 +524,9 @@ class Model:
         
         if not isinstance(fb_njobs, int):
             raise ValueError(f"fb_njobs must be a integer. Provided type: {type(fb_njobs)}")
+        
+        if not isinstance(show_descent_graph, bool):
+            raise ValueError(f"show_descent_graph must be a boolean. Provided type: {type(show_descent_graph)}")
         
         if not isinstance(save_model, bool):
             raise ValueError(f"save_model must be a boolean. Provided type: {type(save_model)}")
@@ -613,7 +621,8 @@ class Model:
                                          target_name='residual', 
                                          categorical_columns=['is_weekend'],
                                          n_trials=optuna_trials,
-                                         loss='RMSE')
+                                         loss='RMSE',
+                                         show_descent_graph=show_descent_graph)
         self.catboost_model = cb_model
         selected_inf_cols = []
         selected_inf_cols.extend(['date'])
@@ -698,9 +707,10 @@ class Model:
     def predict_order(
             self,
             data: pd.DataFrame,
-    ) -> list:
+    ) -> dict:
         """
-        Returns recommended orders on day T+1 (prediction day) based on forcasted consumption on day T+1.
+        Returns recommended orders and predicted consumption as dict with keys 'order' and 'cons_pred' on day T+1 (prediction day) 
+        based on forcasted consumption on day T+1.
         Note: input data should contain all necessary columns and stock_left column. 
         To view them, use view_inference_cols() method.
 
@@ -708,7 +718,7 @@ class Model:
         --------
         >>> model = tts.Model()
         >>> model.train(data=train_data)
-        >>> order = model.predict_order(data=inference_data, k_coef=10)
+        >>> order = model.predict_order(data=inference_data)
         """
 
         # checking if all input columns are present
@@ -728,7 +738,7 @@ class Model:
         y_adj_to_order = np.round(y_adj - np.array(data["stock_left"])) 
         y_adj_to_order[y_adj_to_order < 0] = 0 # preventer of negative order if some server data mistake occurs
         y_box_adj_to_order = np.round(y_adj_to_order / np.array(data["k_coef"]))
-        return y_box_adj_to_order
+        return {"order": y_box_adj_to_order, "cons_pred": cons_pred}
 
 
     def view_cb_inference_cols(

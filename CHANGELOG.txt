@@ -22,3 +22,7 @@ Change Log
 ------------------
 - Now predict_order method returns dict with predicted orders and cons
 - Added visualisation of optuna trials
+
+1.1.4 (17.08.2024)
+------------------
+- Optimized Prophet inference. 54% reduction of inference time.

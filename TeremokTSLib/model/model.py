@@ -156,7 +156,8 @@ def _train_prophet_model(
                         growth='flat',
                         holidays=holidays, 
                         daily_seasonality=False,
-                        yearly_seasonality=False)
+                        yearly_seasonality=False,
+                        uncertainty_samples=None,)
             m.add_seasonality(name='weekly', period=7, fourier_order=4)
             m.add_seasonality(name='monthly', period=30, fourier_order=4)
             m.fit(train_data)
@@ -190,7 +191,8 @@ def _train_prophet_model(
                     holidays_prior_scale=best_hps,
                     daily_seasonality=False,
                     yearly_seasonality=False,
-                    holidays=holidays)
+                    holidays=holidays,
+                    uncertainty_samples=None,)
 
     # Add seasonality
     model.add_seasonality(name='weekly', period=7, fourier_order=4)

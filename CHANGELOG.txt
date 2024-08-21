@@ -30,3 +30,7 @@ Change Log
 1.1.5 (21.08.2024)
 ------------------
 - Fixed bug with Optuna beta optimisation.
+
+1.1.6 (21.08.2024)
+------------------
+- Fixed bug with ewma shift.

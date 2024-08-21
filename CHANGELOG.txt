@@ -26,3 +26,7 @@ Change Log
 1.1.4 (17.08.2024)
 ------------------
 - Optimized Prophet inference. 54% reduction of inference time.
+
+1.1.5 (21.08.2024)
+------------------
+- Fixed bug with Optuna beta optimisation.

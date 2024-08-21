@@ -488,6 +488,7 @@ class Model:
             n_sma_list: list=[2,3],
             fourier_order: int=3,
             optuna_trials: int=15,
+            max_beta: float=1.7,
             fb_njobs: int=1,
             show_residuals_pacf: int=0,
             show_descent_graph: bool=False,
@@ -657,7 +658,8 @@ class Model:
                                            k=k_coefficient,
                                            lifetime_d=days_till_perish,
                                            cost=goods_cost,
-                                           alpha=alpha_coefficient,)
+                                           alpha=alpha_coefficient,
+                                           max_beta=max_beta)
         self.beta_coefficient = best_beta
         print('Training finished successfully!')
 

@@ -168,10 +168,10 @@ def _validate(data: pd.DataFrame,
         test_model.alpha = 1
         _, _, loss, _, _ = _simulate(data, test_model, initial_stock, ewma_length, save_results=False, plot=False)
         return loss
-    study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=42))
+    study = optuna.create_study(direction='minimize') #, sampler=optuna.samplers.TPESampler(seed=42)
     study.optimize(objective, n_trials=n_trials)
     best_betas = sorted([best_trial.params['beta'] for best_trial in study.best_trials])
-    best_beta = np.round(np.percentile(best_betas, 50), 3)
+    best_beta = np.round(np.mean(best_betas), 3)
     return best_beta
 
 def _itertest(data,
@@ -183,7 +183,7 @@ def _itertest(data,
               initial_stock_test: float,
               ewma_length: int,  
               min_beta: float=1,
-              max_beta: float=2.5,
+              max_beta: float=1.7,
               n_trials: int=100,       
               save_results=False, 
               plot=True

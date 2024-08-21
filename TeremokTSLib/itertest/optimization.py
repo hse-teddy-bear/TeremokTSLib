@@ -65,7 +65,7 @@ class EnsembleModel(OrderModel):
 
     def next_stock(self, data, day, mean_cons):
         cons_pred = max(data.loc[day + 1, 'cons_pred'], 0)
-        return max((cons_pred + 0.85 * mean_cons), (cons_pred * self.beta * (1 - ((cons_pred - mean_cons) / mean_cons) ** 2)))
+        return max((cons_pred + 0.70 * mean_cons), (cons_pred * self.beta * (1 - ((cons_pred - mean_cons) / mean_cons) ** 2)))
 
 
 # -----------------------------------------------------------------------
@@ -156,19 +156,31 @@ def _validate(data: pd.DataFrame,
               k: int,
               lifetime_d: int,
               cost: float,
-              alpha: float,
+              alpha: float=4,
               min_beta: float=1, 
               max_beta: float=2.5,
               n_trials: int=100,
     ) -> float:
     optuna.logging.set_verbosity(optuna.logging.WARNING)
+    search_space = {
+    'beta': np.arange(min_beta, max_beta, 0.05).tolist()
+    }
+    sampler = optuna.samplers.GridSampler(search_space)
     def objective(trial):
         beta = trial.suggest_float('beta', min_beta, max_beta)
-        test_model = EnsembleModel(k, lifetime_d, cost, alpha, beta)
-        test_model.alpha = 1
-        _, _, loss, _, _ = _simulate(data, test_model, initial_stock, ewma_length, save_results=False, plot=False)
+        test_model = EnsembleModel(k=k, 
+                                   lifetime_d=lifetime_d, 
+                                   beta=beta, 
+                                   alpha=alpha, 
+                                   cost=cost)
+        _, _, loss, _, _ = _simulate(data=data, 
+                                     model=test_model, 
+                                     initial_stock=initial_stock, 
+                                     ewma_length=ewma_length, 
+                                     save_results=False, 
+                                     plot=False)
         return loss
-    study = optuna.create_study(direction='minimize') #, sampler=optuna.samplers.TPESampler(seed=42)
+    study = optuna.create_study(direction='minimize', sampler=sampler) #, sampler=optuna.samplers.TPESampler(seed=42)
     study.optimize(objective, n_trials=n_trials)
     best_betas = sorted([best_trial.params['beta'] for best_trial in study.best_trials])
     best_beta = np.round(np.mean(best_betas), 3)

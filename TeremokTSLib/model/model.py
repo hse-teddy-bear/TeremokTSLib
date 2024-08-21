@@ -102,13 +102,13 @@ def _calculate_lagged_consumption_and_ewma(
     # Ensure the dataframe is sorted by date
     df = df.sort_values(by='date').reset_index(drop=True)
     # Calculate EWMA for the current day (T+1)
-    df[f'ewma({ewma_length})(T+1)'] = _calc_rolling_ewma(df['consumption'], window_size=ewma_length)
+    df[f'ewma({ewma_length})(T+1)'] = _calc_rolling_ewma(df['consumption'], window_size=ewma_length).shift(-1)
     # Add lagged consumption columns and calculate EWMA for each lag
     for lag in n_lags_list:
         shifted_cons = df['consumption'].shift(lag)
         lag_col = f'cons(T-{lag-1})'
         ewma_col = f'ewma({ewma_length})(T-{lag-1})'
-        df[ewma_col] = _calc_rolling_ewma(shifted_cons, window_size=ewma_length)
+        df[ewma_col] = _calc_rolling_ewma(shifted_cons, window_size=ewma_length).shift(-1)
         df[lag_col] = shifted_cons
     return df
 
@@ -130,7 +130,7 @@ def _train_prophet_model(
 
     # Setting threshholds for time series split (train set)
     unique_dates = sorted(data[date_col].unique())
-    train_threshold =  unique_dates[int(len(unique_dates) * 0.70)] #First 70% of data - train data
+    train_threshold =  unique_dates[int(len(unique_dates) * 0.99)] #all input data is train data for prophet
     train_data = data.loc[data[date_col] <= train_threshold]
 
     #detrending data
@@ -141,7 +141,7 @@ def _train_prophet_model(
     # Hyperparams tuning for Prophet
     if is_tuning:
         param_grid = {  
-            'changepoint_prior_scale': [0.01, 0.025, 0.03, 0.04, 0.05],
+            'changepoint_prior_scale': [0.01, 0.025, 0.03, 0.04, 0.25, 0.5],
             'seasonality_prior_scale': [0.5, 1, 2, 3, 5, 8, 10],
             'holidays_prior_scale': [5, 10, 30, 50],
         }
@@ -160,6 +160,7 @@ def _train_prophet_model(
                         uncertainty_samples=None,)
             m.add_seasonality(name='weekly', period=7, fourier_order=4)
             m.add_seasonality(name='monthly', period=30, fourier_order=4)
+            m.add_seasonality(name='yearly', period=365, fourier_order=10)
             m.fit(train_data)
 
             y_pred = m.predict(train_data[['ds']])['yhat']
@@ -180,7 +181,7 @@ def _train_prophet_model(
         best_hps = tuning_results.sort_values(by='rmse').iloc[0]['holidays_prior_scale']
 
     else:
-        best_cps = 0.025
+        best_cps = 0.5
         best_sps = 5
         best_hps = 10
 
@@ -197,6 +198,7 @@ def _train_prophet_model(
     # Add seasonality
     model.add_seasonality(name='weekly', period=7, fourier_order=4)
     model.add_seasonality(name='monthly', period=30, fourier_order=4)
+    model.add_seasonality(name='yearly', period=365, fourier_order=10)
 
     # Fit the model
     model.fit(train_data)
@@ -478,7 +480,7 @@ class Model:
             k_coefficient: float=1,
             days_till_perish: int=2,
             goods_cost: float=1.0,
-            alpha_coefficient: float=1.0,
+            alpha_coefficient: float=4.0,
             catboost_params: dict={},
             prophet_params: dict={},
             ewma_length: int=10,
@@ -488,8 +490,9 @@ class Model:
             n_sma_list: list=[2,3],
             fourier_order: int=3,
             optuna_trials: int=15,
-            max_beta: float=1.7,
+            max_beta: float=2.0,
             fb_njobs: int=1,
+            fb_tuning: bool=False,
             show_residuals_pacf: int=0,
             show_descent_graph: bool=False,
             save_model: bool=False,
@@ -583,7 +586,7 @@ class Model:
 
 
         # calculating ewma (base layer) as Trend layer
-        data['trend'] = _calc_rolling_ewma(data['consumption'], window_size=ewma_length)
+        data['trend'] = _calc_rolling_ewma(data['consumption'], window_size=ewma_length).shift(-1)
         data.dropna(inplace=True)
         data.reset_index(drop=True, inplace=True)
 
@@ -595,7 +598,7 @@ class Model:
                                         target_col='consumption',
                                         trend_col='trend',
                                         holidays=holidays_df,
-                                        is_tuning=True,
+                                        is_tuning=fb_tuning,
                                         fb_njobs=fb_njobs)
         self.prophet_model = fb_model
 
@@ -639,7 +642,7 @@ class Model:
 
 
         # beta coefficient optimization
-        validation_dataset = _get_slice(data, start=0.70, end=0.85)
+        validation_dataset = _get_slice(data, start=0.70, end=0.95)
         validation_dataset.rename(columns={'consumption': 'cons'}, inplace=True)
         validation_cb_dataset = _preprocess_ts(data=ts_for_training, 
                                                 target='residual',
@@ -647,7 +650,7 @@ class Model:
                                                 n_sma_list=n_sma_list,
                                                 fourier_order=fourier_order,
                                                 dropna=False)
-        validation_cb_dataset = _get_slice(validation_cb_dataset, start=0.70, end=0.85)
+        validation_cb_dataset = _get_slice(validation_cb_dataset, start=0.70, end=0.95)
         validation_cb_dataset.drop(columns=['date', 'residual'], inplace=True)
         validation_dataset['cons_pred'] = validation_dataset['trend'] + validation_dataset['seasonality'] + cb_model.predict(validation_cb_dataset)
         validation_dataset.dropna(inplace=True)
@@ -680,7 +683,7 @@ class Model:
         
         output = []
         # trend layer
-        trend = data[f'ewma({self.ewma_length})(T+1)']
+        trend = data[f'ewma({self.ewma_length})(T+1)'] #TODO: - remove ewma trend (or substitute)
         # seasonality layer
         data['date'] = pd.to_datetime(data['date']) #TODO: rework this later
         tmr_dates = list(data['date'] + pd.DateOffset(days=1))
@@ -738,7 +741,7 @@ class Model:
         cons_pred[cons_pred < 0] = 0 # preventer of boosing negative output
         # converting predicted consumption to order in boxes with k and beta coefficient
         mean_cons = np.array(data[f"ewma({self.ewma_length})(T+1)"])
-        y_adj = np.maximum((cons_pred + 0.85 * mean_cons), (cons_pred * self.beta_coefficient * (1 - ((cons_pred - mean_cons) / mean_cons) ** 2)))
+        y_adj = np.maximum((cons_pred + 0.70 * mean_cons), (cons_pred * self.beta_coefficient * (1 - ((cons_pred - mean_cons) / mean_cons) ** 2)))
         y_adj_to_order = np.round(y_adj - np.array(data["stock_left"])) 
         y_adj_to_order[y_adj_to_order < 0] = 0 # preventer of negative order if some server data mistake occurs
         y_box_adj_to_order = np.round(y_adj_to_order / np.array(data["k_coef"]))

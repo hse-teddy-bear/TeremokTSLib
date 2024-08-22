@@ -55,6 +55,7 @@ class EnsembleModel(OrderModel):
                  k: int, 
                  lifetime_d: int,
                  beta: float,
+                 valid_mean_cons: float,
                  alpha: float=1.0,
                  cost: float=1.0,
                  name: str='new_model',
@@ -62,10 +63,12 @@ class EnsembleModel(OrderModel):
         super().__init__(k, lifetime_d, cost, alpha)
         self.beta = beta
         self.name = name
+        self.valid_mean_cons = valid_mean_cons
 
     def next_stock(self, data, day, mean_cons):
         cons_pred = max(data.loc[day + 1, 'cons_pred'], 0)
-        return max((cons_pred + 0.70 * mean_cons), (cons_pred * self.beta * (1 - ((cons_pred - mean_cons) / mean_cons) ** 2)))
+        scaling_factor = np.minimum(1, 1 - 0.125 * (cons_pred / self.valid_mean_cons - 1))
+        return max((cons_pred + 0.70 * mean_cons) * scaling_factor, (cons_pred * self.beta * scaling_factor))
 
 
 # -----------------------------------------------------------------------
@@ -155,6 +158,7 @@ def _validate(data: pd.DataFrame,
               ewma_length: int,
               k: int,
               lifetime_d: int,
+              valid_mean_cons: float,
               cost: float,
               alpha: float=4,
               min_beta: float=1, 
@@ -171,6 +175,7 @@ def _validate(data: pd.DataFrame,
         test_model = EnsembleModel(k=k, 
                                    lifetime_d=lifetime_d, 
                                    beta=beta, 
+                                   valid_mean_cons=valid_mean_cons,
                                    alpha=alpha, 
                                    cost=cost)
         _, _, loss, _, _ = _simulate(data=data, 
@@ -180,48 +185,11 @@ def _validate(data: pd.DataFrame,
                                      save_results=False, 
                                      plot=False)
         return loss
-    study = optuna.create_study(direction='minimize', sampler=sampler) #, sampler=optuna.samplers.TPESampler(seed=42)
+    study = optuna.create_study(direction='minimize', sampler=sampler)
     study.optimize(objective, n_trials=n_trials)
     best_betas = sorted([best_trial.params['beta'] for best_trial in study.best_trials])
     best_beta = np.round(np.mean(best_betas), 3)
     return best_beta
 
-def _itertest(data,
-              k: int,
-              lifetime_d: int,
-              cost: float,
-              alpha: float,
-              initial_stock_val: float,
-              initial_stock_test: float,
-              ewma_length: int,  
-              min_beta: float=1,
-              max_beta: float=1.7,
-              n_trials: int=100,       
-              save_results=False, 
-              plot=True
-    ) -> list:
-    best_beta = None
-    unique_dates = sorted(data.date.unique())
-    valid_threshold_min =  unique_dates[int(len(unique_dates) * 0.70)]
-    valid_threshold_max =  unique_dates[int(len(unique_dates) * 0.85)]
-    valid_data = data.loc[(data.date >= valid_threshold_min) & (data.date <= valid_threshold_max)].reset_index()
-    test_data = data.loc[data.date > valid_threshold_max].reset_index()
-    best_beta = _validate(data=valid_data,
-                          initial_stock=initial_stock_val,
-                          ewma_length=ewma_length,
-                          k=k,
-                          lifetime_d=lifetime_d,
-                          cost=cost,
-                          alpha=alpha,
-                          min_beta=min_beta,
-                          max_beta=max_beta,
-                          n_trials=n_trials)
-    model = EnsembleModel(k, lifetime_d, cost, alpha, best_beta)
-    write_off, stop_sale, loss, model_order_q, sum_loss = _simulate(data=test_data, 
-                                                                    model=model, 
-                                                                    initial_stock=initial_stock_test, 
-                                                                    ewma_length=ewma_length, 
-                                                                    save_results=save_results, 
-                                                                    plot=plot)
-    return [write_off, stop_sale, loss, best_beta, model_order_q, sum_loss]
+
     

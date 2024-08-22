@@ -467,6 +467,7 @@ class Model:
         self.n_sma_list = list(),
         self.ewma_length = int,
         self.fourier_order = int,
+        self.mean_cons = float()
 
     def __str__(self) -> str:
         return '<TeremokTSLib Model>'
@@ -643,6 +644,7 @@ class Model:
 
         # beta coefficient optimization
         validation_dataset = _get_slice(data, start=0.70, end=0.95)
+        self.mean_cons = np.mean(validation_dataset['consumption'])
         validation_dataset.rename(columns={'consumption': 'cons'}, inplace=True)
         validation_cb_dataset = _preprocess_ts(data=ts_for_training, 
                                                 target='residual',
@@ -659,6 +661,7 @@ class Model:
                                            initial_stock=initial_stock_assumption,
                                            ewma_length=ewma_length,
                                            k=k_coefficient,
+                                           valid_mean_cons=self.mean_cons,
                                            lifetime_d=days_till_perish,
                                            cost=goods_cost,
                                            alpha=alpha_coefficient,
@@ -740,8 +743,9 @@ class Model:
         cons_pred = np.array(self.predict_consumption(data=data))
         cons_pred[cons_pred < 0] = 0 # preventer of boosing negative output
         # converting predicted consumption to order in boxes with k and beta coefficient
-        mean_cons = np.array(data[f"ewma({self.ewma_length})(T+1)"])
-        y_adj = np.maximum((cons_pred + 0.70 * mean_cons), (cons_pred * self.beta_coefficient * (1 - ((cons_pred - mean_cons) / mean_cons) ** 2)))
+        scaling_factor = np.minimum(1, 1 - 0.125 * (cons_pred / self.mean_cons - 1))
+        ewma_cons = np.array(data[f"ewma({self.ewma_length})(T+1)"])
+        y_adj = np.maximum((cons_pred + 0.70 * ewma_cons) * scaling_factor, (cons_pred * self.beta_coefficient * scaling_factor))
         y_adj_to_order = np.round(y_adj - np.array(data["stock_left"])) 
         y_adj_to_order[y_adj_to_order < 0] = 0 # preventer of negative order if some server data mistake occurs
         y_box_adj_to_order = np.round(y_adj_to_order / np.array(data["k_coef"]))
@@ -785,10 +789,11 @@ class Model:
             initial_stock_left: float,
             k_coefficient: int=1,
             lifetime_d: int=2,
-            cost: float=1,
-            alpha: float=4,
-            save_results=False, 
-            plot=True
+            cost: float=1.0,
+            alpha: float=4.0,
+            save_name: str='new_model',
+            save_results: bool=False, 
+            plot: bool=True
     ) -> list:
         """
         Simulates the workflow of automatic order on given data. Iteratively calculates orders and stocks on the spot. 
@@ -818,8 +823,10 @@ class Model:
         model = optimization.EnsembleModel(k=k_coefficient, 
                                             lifetime_d=lifetime_d, 
                                             beta=self.beta_coefficient,
+                                            valid_mean_cons=self.mean_cons,
                                             alpha=alpha,
-                                            cost=cost,)
+                                            cost=cost,
+                                            name=save_name)
         write_off, stop_sale, loss, model_order_q, sum_loss = optimization._simulate(data=opt_test_data, 
                                                                                         model=model, 
                                                                                         initial_stock=initial_stock_left, 

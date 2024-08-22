@@ -34,3 +34,7 @@ Change Log
 1.1.6 (21.08.2024)
 ------------------
 - Fixed bug with ewma shift.
+
+1.1.7 (22.08.2024)
+------------------
+- Added regularisation for orders in time of surges in consumption.

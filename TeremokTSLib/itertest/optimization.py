@@ -55,6 +55,8 @@ class EnsembleModel(OrderModel):
                  k: int, 
                  lifetime_d: int,
                  beta: float,
+                 teta: float,
+                 gamma: float,
                  valid_mean_cons: float,
                  alpha: float=1.0,
                  cost: float=1.0,
@@ -62,13 +64,15 @@ class EnsembleModel(OrderModel):
         ) -> None:
         super().__init__(k, lifetime_d, cost, alpha)
         self.beta = beta
+        self.gamma = gamma
+        self.teta = teta
         self.name = name
         self.valid_mean_cons = valid_mean_cons
 
     def next_stock(self, data, day, mean_cons):
         cons_pred = max(data.loc[day + 1, 'cons_pred'], 0)
-        scaling_factor = np.minimum(1, 1 - 0.125 * (cons_pred / self.valid_mean_cons - 1))
-        return max((cons_pred + 0.70 * mean_cons) * scaling_factor, (cons_pred * self.beta * scaling_factor))
+        scaling_factor = np.minimum(1, 1 - self.gamma * (cons_pred / self.valid_mean_cons - 1))
+        return max((cons_pred + self.teta * mean_cons) * scaling_factor, (cons_pred * self.beta * scaling_factor))
 
 
 # -----------------------------------------------------------------------
@@ -83,11 +87,11 @@ def _prep_data(
     return data
 
 def _plot_results(
-        data, 
-        model, 
+        data: pd.DataFrame, 
+        model: EnsembleModel, 
         write_off, 
         stop_sale, 
-        save_results,
+        save_results: bool=False,
     ) -> None:
     plt.figure(figsize=(20,10))
     plt.plot(data['date'], data['cons'], label='Real consumption', color='blue')
@@ -99,14 +103,16 @@ def _plot_results(
     plt.legend()
     plt.suptitle(f'Itertest results on given data, {model.name}', fontsize=18)
     wape = np.round(np.sum(np.abs(data['cons'] - data['cons_pred'])) / np.sum(np.abs(data['cons'])) * 100, 1)
-    plt.title(f'Stop sales: {stop_sale}; Write offs: {write_off}\n' + f'beta: {model.beta}\n' + f'wape: {wape}%', fontsize=18, loc='right')
+    plt.title(f'Stop sales: {stop_sale}; Write offs: {write_off}\n' + f'beta: {model.beta}, teta_safe: {model.teta}, gamma_reg: {model.gamma}\n' + f'wape: {wape}%', fontsize=18, loc='right')
     plt.xlabel('Date', fontsize=14)
     plt.ylabel('stock(beggining of the day) - cons(day)', fontsize=14)
     if save_results:
         if not os.path.exists(f"results"):
             os.mkdir(f"results")
         plt.savefig(f"results/{model.name}.png")
-    plt.show()
+        plt.close()
+    else:
+        plt.show()
 
 def _simulate(
         data: pd.DataFrame,
@@ -134,13 +140,15 @@ def _simulate(
             stop_sale = -stock_left
             stock_left = 0
         
-        if day-model.lifetime_d >= 0 and data.loc[day-model.lifetime_d, 'model_stock_beg'] - data.loc[day-model.lifetime_d:day, 'cons'].sum() - data.loc[day-model.lifetime_d:day, 'write_off'].sum() > 0:
-            write_off = data.loc[day-model.lifetime_d, 'model_stock_beg'] - sum(data.loc[day-model.lifetime_d:day, 'cons']) - sum(data.loc[day-model.lifetime_d:day, 'write_off'])
-            stock_left -= write_off
+        if day-model.lifetime_d+1 >= 0:
+            write_off_calc = data.loc[day-model.lifetime_d+1, 'model_stock_beg'] - data.loc[day-model.lifetime_d+1:day, 'cons'].sum() - data.loc[day-model.lifetime_d+1:day, 'write_off'].sum()
+            if write_off_calc > 0:
+                write_off = write_off_calc
+                stock_left -= write_off
         
         data.loc[day, 'model_stock_end'] = stock_left
         mean_cons = np.mean(data.loc[day-ewma_length:day, 'cons'])
-        order = model.order(data, day, mean_cons)
+        order = max(0, model.order(data, day, mean_cons))
         data.loc[day+1, 'model_stock_beg'] = stock_left + order
         data.loc[day, 'order'] = order
         data.loc[day, 'write_off'] = write_off
@@ -164,18 +172,27 @@ def _validate(data: pd.DataFrame,
               alpha: float=4,
               min_beta: float=1, 
               max_beta: float=2.5,
-              n_trials: int=100,
+              min_teta: float=0.4,
+              max_teta: float=0.8,
+              min_gamma: float=0.05,
+              max_gamma: float=0.2,
+              n_trials: int=200,
     ) -> float:
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    search_space = {
-    'beta': np.arange(min_beta, max_beta, 0.05).tolist()
-    }
-    sampler = optuna.samplers.GridSampler(search_space)
+
+    beta_values = np.arange(min_beta, max_beta + 0.05, 0.05).tolist()
+    teta_values = np.arange(min_teta, max_teta + 0.05, 0.05).tolist()
+    gamma_values = np.arange(min_gamma, max_gamma + 0.05, 0.05).tolist()
+
     def objective(trial):
-        beta = trial.suggest_float('beta', min_beta, max_beta)
+        _beta = trial.suggest_float('beta', min_beta, max_beta)
+        _teta = trial.suggest_float('teta', min_teta, max_teta)
+        _gamma = trial.suggest_float('gamma', min_gamma, max_gamma)
         test_model = EnsembleModel(k=k, 
                                    lifetime_d=lifetime_d, 
-                                   beta=beta, 
+                                   beta=_beta, 
+                                   teta=_teta,
+                                   gamma=_gamma,
                                    valid_mean_cons=valid_mean_cons,
                                    alpha=alpha, 
                                    cost=cost)
@@ -186,11 +203,20 @@ def _validate(data: pd.DataFrame,
                                      save_results=False, 
                                      plot=False)
         return loss
-    study = optuna.create_study(direction='minimize', sampler=sampler)
+    
+    study = optuna.create_study(direction='minimize',
+                                sampler=optuna.samplers.GridSampler(
+                                search_space={
+                                    'beta': beta_values,
+                                    'teta': teta_values,
+                                    'gamma': gamma_values}))
     study.optimize(objective, n_trials=n_trials)
-    best_betas = sorted([best_trial.params['beta'] for best_trial in study.best_trials])
-    best_beta = np.round(np.mean(best_betas), 3)
-    return best_beta
+    best_coefs_dict = {}
+    for coef in ["beta", "teta", "gamma"]:
+        best_coefs = sorted([best_trial.params[f'{coef}'] for best_trial in study.best_trials])
+        best_coef = np.round(np.mean(best_coefs), 3)
+        best_coefs_dict[f"best_{coef}"] = best_coef
+    return best_coefs_dict
 
 
     

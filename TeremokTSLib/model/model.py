@@ -140,8 +140,10 @@ def _train_prophet_model(
 
     # Hyperparams tuning for Prophet
     if is_tuning:
+        logging.getLogger('cmdstanpy').setLevel(logging.ERROR)
+        logging.getLogger("cmdstanpy").disabled = True
         param_grid = {  
-            'changepoint_prior_scale': [0.01, 0.025, 0.03, 0.04, 0.25, 0.5],
+            'changepoint_prior_scale': [0.01, 0.025, 0.03, 0.05, 0.1],
             'seasonality_prior_scale': [0.5, 1, 2, 3, 5, 8, 10],
             'holidays_prior_scale': [5, 10, 30, 50],
         }
@@ -467,7 +469,9 @@ class Model:
         self.n_sma_list = list(),
         self.ewma_length = int,
         self.fourier_order = int,
-        self.mean_cons = float()
+        self.safe_stock_teta = float,
+        self.regularization_gamma = float,
+        self.mean_cons = float
 
     def __str__(self) -> str:
         return '<TeremokTSLib Model>'
@@ -491,7 +495,9 @@ class Model:
             n_sma_list: list=[2,3],
             fourier_order: int=3,
             optuna_trials: int=15,
-            max_beta: float=2.0,
+            beta: list=[1.0, 2.0],
+            teta: list=[0.4, 0.8],
+            gamma: list=[0.05, 0.20],
             fb_njobs: int=1,
             fb_tuning: bool=False,
             show_residuals_pacf: int=0,
@@ -657,7 +663,7 @@ class Model:
         validation_dataset['cons_pred'] = validation_dataset['trend'] + validation_dataset['seasonality'] + cb_model.predict(validation_cb_dataset)
         validation_dataset.dropna(inplace=True)
         initial_stock_assumption = np.percentile(validation_dataset['cons'], 85) * 1.5 #TODO: assert this later
-        best_beta = optimization._validate(data=validation_dataset,
+        best_coefs = optimization._validate(data=validation_dataset,
                                            initial_stock=initial_stock_assumption,
                                            ewma_length=ewma_length,
                                            k=k_coefficient,
@@ -665,8 +671,15 @@ class Model:
                                            lifetime_d=days_till_perish,
                                            cost=goods_cost,
                                            alpha=alpha_coefficient,
-                                           max_beta=max_beta)
-        self.beta_coefficient = best_beta
+                                           max_beta=max(beta),
+                                           min_beta=min(beta),
+                                           max_teta=max(teta),
+                                           min_teta=min(teta),
+                                           max_gamma=max(gamma),
+                                           min_gamma=min(gamma))
+        self.beta_coefficient = best_coefs["best_beta"]
+        self.safe_stock_teta = best_coefs["best_teta"]
+        self.regularization_gamma = best_coefs["best_gamma"]
         print('Training finished successfully!')
 
 
@@ -743,9 +756,9 @@ class Model:
         cons_pred = np.array(self.predict_consumption(data=data))
         cons_pred[cons_pred < 0] = 0 # preventer of boosing negative output
         # converting predicted consumption to order in boxes with k and beta coefficient
-        scaling_factor = np.minimum(1, 1 - 0.125 * (cons_pred / self.mean_cons - 1))
+        scaling_factor = np.minimum(1, 1 - self.regularization_gamma * (cons_pred / self.mean_cons - 1))
         ewma_cons = np.array(data[f"ewma({self.ewma_length})(T+1)"])
-        y_adj = np.maximum((cons_pred + 0.70 * ewma_cons) * scaling_factor, (cons_pred * self.beta_coefficient * scaling_factor))
+        y_adj = np.maximum((cons_pred + self.safe_stock_teta * ewma_cons) * scaling_factor, (cons_pred * self.beta_coefficient * scaling_factor))
         y_adj_to_order = np.round(y_adj - np.array(data["stock_left"])) 
         y_adj_to_order[y_adj_to_order < 0] = 0 # preventer of negative order if some server data mistake occurs
         y_box_adj_to_order = np.round(y_adj_to_order / np.array(data["k_coef"]))
@@ -823,6 +836,8 @@ class Model:
         model = optimization.EnsembleModel(k=k_coefficient, 
                                             lifetime_d=lifetime_d, 
                                             beta=self.beta_coefficient,
+                                            teta=self.safe_stock_teta,
+                                            gamma=self.regularization_gamma,
                                             valid_mean_cons=self.mean_cons,
                                             alpha=alpha,
                                             cost=cost,

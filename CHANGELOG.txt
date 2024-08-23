@@ -43,3 +43,9 @@ Change Log
 ------------------
 - Uploaded fixed seasonality;
 - Added WAPE metric calculation in itertest.
+
+1.1.9 (24.08.2024)
+------------------
+- finally fixed beta optimization;
+- added regularization parameter to optuna;
+- added safe stock coef to optuna;

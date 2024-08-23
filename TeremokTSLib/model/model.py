@@ -160,7 +160,7 @@ def _train_prophet_model(
                         uncertainty_samples=None,)
             m.add_seasonality(name='weekly', period=7, fourier_order=4)
             m.add_seasonality(name='monthly', period=30, fourier_order=4)
-            m.add_seasonality(name='yearly', period=365, fourier_order=10)
+            #m.add_seasonality(name='yearly', period=365, fourier_order=10) <- never include this fucker!
             m.fit(train_data)
 
             y_pred = m.predict(train_data[['ds']])['yhat']
@@ -198,7 +198,7 @@ def _train_prophet_model(
     # Add seasonality
     model.add_seasonality(name='weekly', period=7, fourier_order=4)
     model.add_seasonality(name='monthly', period=30, fourier_order=4)
-    model.add_seasonality(name='yearly', period=365, fourier_order=10)
+    #model.add_seasonality(name='yearly', period=365, fourier_order=10) <- never include this fucker!
 
     # Fit the model
     model.fit(train_data)

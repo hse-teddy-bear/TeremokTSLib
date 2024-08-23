@@ -98,7 +98,8 @@ def _plot_results(
     plt.hlines(y=0, xmin=data.date.min(), xmax=data.date.max(), color='grey', linewidth=2, linestyle='dashed')
     plt.legend()
     plt.suptitle(f'Itertest results on given data, {model.name}', fontsize=18)
-    plt.title(f'Stop sales: {stop_sale}; Write offs: {write_off}\n' + f'beta: {model.beta}', fontsize=18, loc='right')
+    wape = np.round(np.sum(np.abs(data['cons'] - data['cons_pred'])) / np.sum(np.abs(data['cons'])) * 100, 1)
+    plt.title(f'Stop sales: {stop_sale}; Write offs: {write_off}\n' + f'beta: {model.beta}\n' + f'wape: {wape}%', fontsize=18, loc='right')
     plt.xlabel('Date', fontsize=14)
     plt.ylabel('stock(beggining of the day) - cons(day)', fontsize=14)
     if save_results:

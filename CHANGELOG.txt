@@ -35,6 +35,11 @@ Change Log
 ------------------
 - Fixed bug with ewma shift.
 
-1.1.7 (22.08.2024)
+1.1.7 - YANKED - (22.08.2024)
 ------------------
 - Added regularisation for orders in time of surges in consumption.
+
+1.1.8 (23.08.2024)
+------------------
+- Uploaded fixed seasonality;
+- Added WAPE metric calculation in itertest.

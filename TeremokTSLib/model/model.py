@@ -105,7 +105,7 @@ def _calculate_lagged_consumption_and_ewma(
     df[f'ewma({ewma_length})(T+1)'] = _calc_rolling_ewma(df['consumption'], window_size=ewma_length).shift(-1)
     # Add lagged consumption columns and calculate EWMA for each lag
     for lag in n_lags_list:
-        shifted_cons = df['consumption'].shift(lag)
+        shifted_cons = df['consumption'].shift(lag) # разве не должен быть минус?
         lag_col = f'cons(T-{lag-1})'
         ewma_col = f'ewma({ewma_length})(T-{lag-1})'
         df[ewma_col] = _calc_rolling_ewma(shifted_cons, window_size=ewma_length).shift(-1)
@@ -304,8 +304,8 @@ def _train_catboost_model(
     # Splitting data into train, val, test
     # Setting threshholds for time series split
     unique_dates = sorted(data.date.unique())
-    train_threshold =  unique_dates[int(len(unique_dates) * 0.70)] #70%
-    val_threshold = unique_dates[int(len(unique_dates) * 0.85)] #15%
+    train_threshold =  unique_dates[int(len(unique_dates) * 0.92)] #70%
+    val_threshold = unique_dates[int(len(unique_dates) * 0.96)] #15%
 
     # Split data
     train_data = data.loc[data.date <= train_threshold]
@@ -472,6 +472,7 @@ class Model:
         self.safe_stock_teta = float,
         self.regularization_gamma = float,
         self.mean_cons = float
+        self.disable_safe_stock = False
 
     def __str__(self) -> str:
         return '<TeremokTSLib Model>'
@@ -498,6 +499,7 @@ class Model:
             beta: list=[1.0, 2.0],
             teta: list=[0.4, 0.8],
             gamma: list=[0.05, 0.20],
+            disable_safe_stock: bool=False,
             fb_njobs: int=1,
             fb_tuning: bool=False,
             show_residuals_pacf: int=0,
@@ -571,6 +573,7 @@ class Model:
         self.n_sma_list = n_sma_list
         self.ewma_length = ewma_length
         self.fourier_order = fourier_order
+        self.disable_safe_stock = disable_safe_stock
 
 
         # checking input daily time series data for missing dates (spaces)
@@ -676,7 +679,8 @@ class Model:
                                            max_teta=max(teta),
                                            min_teta=min(teta),
                                            max_gamma=max(gamma),
-                                           min_gamma=min(gamma))
+                                           min_gamma=min(gamma),
+                                           disable_safe_stock=self.disable_safe_stock)
         self.beta_coefficient = best_coefs["best_beta"]
         self.safe_stock_teta = best_coefs["best_teta"]
         self.regularization_gamma = best_coefs["best_gamma"]
@@ -758,7 +762,10 @@ class Model:
         # converting predicted consumption to order in boxes with k and beta coefficient
         scaling_factor = np.minimum(1, 1 - self.regularization_gamma * (cons_pred / self.mean_cons - 1))
         ewma_cons = np.array(data[f"ewma({self.ewma_length})(T+1)"])
-        y_adj = np.maximum((cons_pred + self.safe_stock_teta * ewma_cons) * scaling_factor, (cons_pred * self.beta_coefficient * scaling_factor))
+        if self.disable_safe_stock:
+            y_adj = (cons_pred * self.beta_coefficient * scaling_factor)
+        else:
+            y_adj = np.maximum((cons_pred + self.safe_stock_teta * ewma_cons) * scaling_factor, (cons_pred * self.beta_coefficient * scaling_factor))
         y_adj_to_order = np.round(y_adj - np.array(data["stock_left"])) 
         y_adj_to_order[y_adj_to_order < 0] = 0 # preventer of negative order if some server data mistake occurs
         y_box_adj_to_order = np.round(y_adj_to_order / np.array(data["k_coef"]))
@@ -839,6 +846,7 @@ class Model:
                                             teta=self.safe_stock_teta,
                                             gamma=self.regularization_gamma,
                                             valid_mean_cons=self.mean_cons,
+                                            disabled_safe_stock=self.disable_safe_stock,
                                             alpha=alpha,
                                             cost=cost,
                                             name=save_name)

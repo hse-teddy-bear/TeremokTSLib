@@ -1,4 +1,6 @@
 model_test.ipynb
+catboost_info
+results
 
 __pycache__/
 *.py[cod]

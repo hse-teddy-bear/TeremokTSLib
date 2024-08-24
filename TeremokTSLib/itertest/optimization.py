@@ -58,6 +58,7 @@ class EnsembleModel(OrderModel):
                  teta: float,
                  gamma: float,
                  valid_mean_cons: float,
+                 disabled_safe_stock: bool=False,
                  alpha: float=1.0,
                  cost: float=1.0,
                  name: str='new_model',
@@ -68,11 +69,15 @@ class EnsembleModel(OrderModel):
         self.teta = teta
         self.name = name
         self.valid_mean_cons = valid_mean_cons
+        self.disabled_safe_stock = disabled_safe_stock
 
     def next_stock(self, data, day, mean_cons):
         cons_pred = max(data.loc[day + 1, 'cons_pred'], 0)
         scaling_factor = np.minimum(1, 1 - self.gamma * (cons_pred / self.valid_mean_cons - 1))
-        return max((cons_pred + self.teta * mean_cons) * scaling_factor, (cons_pred * self.beta * scaling_factor))
+        if self.disabled_safe_stock:
+            return (cons_pred * self.beta * scaling_factor)
+        else:
+            return max((cons_pred + self.teta * mean_cons) * scaling_factor, (cons_pred * self.beta * scaling_factor))
 
 
 # -----------------------------------------------------------------------
@@ -176,6 +181,7 @@ def _validate(data: pd.DataFrame,
               max_teta: float=0.8,
               min_gamma: float=0.05,
               max_gamma: float=0.2,
+              disable_safe_stock: bool=False,
               n_trials: int=200,
     ) -> float:
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -194,6 +200,7 @@ def _validate(data: pd.DataFrame,
                                    teta=_teta,
                                    gamma=_gamma,
                                    valid_mean_cons=valid_mean_cons,
+                                   disabled_safe_stock=disable_safe_stock,
                                    alpha=alpha, 
                                    cost=cost)
         _, _, loss, _, _ = _simulate(data=data, 

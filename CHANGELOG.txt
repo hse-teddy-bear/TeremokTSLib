@@ -49,3 +49,7 @@ Change Log
 - finally fixed beta optimization;
 - added regularization parameter to optuna;
 - added safe stock coef to optuna;
+
+1.2.0 (24.08.2024)
+------------------
+- added support for lower-than-predicted orders.

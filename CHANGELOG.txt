@@ -53,3 +53,8 @@ Change Log
 1.2.0 (24.08.2024)
 ------------------
 - added support for lower-than-predicted orders.
+
+1.2.1 (26.08.2024)
+------------------
+- fixed itertest;
+- added NeuralProphet option.

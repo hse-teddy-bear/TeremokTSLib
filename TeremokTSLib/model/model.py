@@ -33,6 +33,12 @@ from joblib import Parallel, delayed
 
 from TeremokTSLib.itertest import optimization
 
+# Supress LOGGING
+logger = logging.getLogger('cmdstanpy')
+logger.addHandler(logging.NullHandler())
+logger.propagate = False
+logger.setLevel(logging.CRITICAL)
+
 
 # -----------------------------------------------------------------------
 # support methods
@@ -105,7 +111,7 @@ def _calculate_lagged_consumption_and_ewma(
     df[f'ewma({ewma_length})(T+1)'] = _calc_rolling_ewma(df['consumption'], window_size=ewma_length).shift(-1)
     # Add lagged consumption columns and calculate EWMA for each lag
     for lag in n_lags_list:
-        shifted_cons = df['consumption'].shift(lag) # разве не должен быть минус?
+        shifted_cons = df['consumption'].shift(lag-1)
         lag_col = f'cons(T-{lag-1})'
         ewma_col = f'ewma({ewma_length})(T-{lag-1})'
         df[ewma_col] = _calc_rolling_ewma(shifted_cons, window_size=ewma_length).shift(-1)
@@ -125,9 +131,6 @@ def _train_prophet_model(
     Returns a trained Prophet model on given time series data.
     """
 
-    # Supress LOGGING
-    logging.getLogger("cmdstanpy").disabled = True
-
     # Setting threshholds for time series split (train set)
     unique_dates = sorted(data[date_col].unique())
     train_threshold =  unique_dates[int(len(unique_dates) * 0.99)] #all input data is train data for prophet
@@ -140,8 +143,6 @@ def _train_prophet_model(
 
     # Hyperparams tuning for Prophet
     if is_tuning:
-        logging.getLogger('cmdstanpy').setLevel(logging.ERROR)
-        logging.getLogger("cmdstanpy").disabled = True
         param_grid = {  
             'changepoint_prior_scale': [0.01, 0.025, 0.03, 0.05, 0.1],
             'seasonality_prior_scale': [0.5, 1, 2, 3, 5, 8, 10],
@@ -268,6 +269,8 @@ def _preprocess_ts(
     for sma_period in n_sma_list:
         sma_name = f'SMA_{sma_period}d'
         res[sma_name] = data[target].shift(1).rolling(window=sma_period, min_periods=sma_period).mean()
+
+    res['date'] = res['date'] + pd.DateOffset(days=1) #нам нужны фичи прогнозного дня (завтра)
     # date categorical features
     res['is_weekend'] = np.select([(res.date.dt.weekday == 5) | (res.date.dt.weekday == 6)], [1], 0)
     # date Fourier numerical features
@@ -304,8 +307,8 @@ def _train_catboost_model(
     # Splitting data into train, val, test
     # Setting threshholds for time series split
     unique_dates = sorted(data.date.unique())
-    train_threshold =  unique_dates[int(len(unique_dates) * 0.92)] #70%
-    val_threshold = unique_dates[int(len(unique_dates) * 0.96)] #15%
+    train_threshold =  unique_dates[int(len(unique_dates) * 0.92)] 
+    val_threshold = unique_dates[int(len(unique_dates) * 0.96)] 
 
     # Split data
     train_data = data.loc[data.date <= train_threshold]
@@ -390,7 +393,7 @@ def _add_lag_features(
         raw_cons = data[lag_feature_name]
         lag_ewma_name = f"ewma({ewma_length})(T-{lag_number})"
         ewma_trend = data[lag_ewma_name]
-        lag_date = list(data['date'] - pd.DateOffset(days=lag_number+1))
+        lag_date = list(data['date'] + pd.DateOffset(days=-lag_number))
         lag_df = pd.DataFrame(data=lag_date, columns=['ds'], index=list(range(0, len(lag_date))))
         prophet_seasonality = prophet_model.predict(lag_df)['additive_terms']
         residual = raw_cons - ewma_trend - prophet_seasonality
@@ -428,7 +431,7 @@ def _add_date_features(
     """
 
     df_to_add = data[['date']]
-    df_to_add['date'] = df_to_add['date'] + pd.Timedelta(days=timedelta_days)
+    df_to_add['date'] = df_to_add['date'] + pd.DateOffset(days=timedelta_days)
 
     # Weekend - Sat, Sun
     df_to_add['is_weekend'] = np.select([(df_to_add.date.dt.weekday == 5) | (df_to_add.date.dt.weekday == 6)], [1], 0)
@@ -497,7 +500,7 @@ class Model:
             fourier_order: int=3,
             optuna_trials: int=15,
             beta: list=[1.0, 2.0],
-            teta: list=[0.4, 0.8],
+            teta: list=[0.3, 0.5],
             gamma: list=[0.05, 0.20],
             disable_safe_stock: bool=False,
             fb_njobs: int=1,
@@ -690,9 +693,12 @@ class Model:
     def predict_consumption(
             self,
             data: pd.DataFrame,
+            decompose: bool=False,
     ) -> list:
         """
         Returns predicted consumption for each row for day T+1 (tomorrow).
+        This method adds 1 day to input date and predicts on "tomorrow".
+        Note: On inference you should not add future days!
         """
 
         # checking if all input columns are present
@@ -728,7 +734,11 @@ class Model:
         residual = self.catboost_model.predict(cb_inference_df)
         # final output calculation
         output = trend + seasonality + residual
-        return np.round(np.array(output), 2)
+        if decompose:
+            return [trend, seasonality, residual]
+        elif decompose==False:
+            return np.round(np.array(output), 2)
+
 
 
     def predict_order(
@@ -811,6 +821,7 @@ class Model:
             lifetime_d: int=2,
             cost: float=1.0,
             alpha: float=4.0,
+            admin_version: bool=False,
             save_name: str='new_model',
             save_results: bool=False, 
             plot: bool=True
@@ -825,19 +836,25 @@ class Model:
         prepd_data.dropna(inplace=True)
         prepd_data.reset_index(drop=True, inplace=True)
         real_consumption = list(prepd_data['consumption'])
-        prepd_data.drop(columns=['consumption'], inplace=True)
 
         # create predictions of consumption for each day
-        if self.is_trained:
-            cons_pred = self.predict_consumption(data=prepd_data)
-        else:
-            raise Exception("Your model is not trained. Train it first, then use itertest method.")
+        if admin_version==False:
+            if self.is_trained:
+                prepd_data.drop(columns=['consumption'], inplace=True)
+                cons_pred = self.predict_consumption(data=prepd_data, decompose=False)
+            else:
+                raise Exception("Your model is not trained. Train it first, then use itertest method.")
+        elif admin_version==True:
+            cons_pred = prepd_data['consumption'].shift(7)
+            prepd_data.drop(columns=['consumption'], inplace=True)
 
         # create opt_test_data = (date, cons, cons_pred)
         opt_test_data = pd.DataFrame()
         opt_test_data['date'] = prepd_data['date']
         opt_test_data['cons'] = real_consumption
+        opt_test_data['cons'] = opt_test_data['cons'].shift(-1) # we are shifting it -1 coz we are predicting TMR cons, so we need to compare with TMR cons
         opt_test_data['cons_pred'] = cons_pred
+        opt_test_data.dropna(inplace=True)
 
         # proceeding to itertest
         model = optimization.EnsembleModel(k=k_coefficient, 
@@ -856,7 +873,7 @@ class Model:
                                                                                         ewma_length=self.ewma_length, 
                                                                                         save_results=save_results, 
                                                                                         plot=plot)
-        return [write_off, stop_sale, loss, model_order_q, sum_loss]
+        return [write_off, stop_sale, loss, model_order_q, sum_loss] 
 
 
     def save_model(

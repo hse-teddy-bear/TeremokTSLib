@@ -1,6 +1,6 @@
 from .model import Model
-from .neuralprophet import NeuralModel
+from .minmax import MinMaxModel
 
-from .support import check_spaces, interpolate_spaces
+from .support import _check_spaces, _interpolate_spaces
 
-__all__ = ['Model', 'NeuralModel']
+__all__ = ['Model', 'MinMaxModel']

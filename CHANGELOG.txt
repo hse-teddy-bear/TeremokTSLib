@@ -58,3 +58,8 @@ Change Log
 ------------------
 - fixed itertest;
 - added NeuralProphet option.
+
+1.2.2 (28.08.2024)
+------------------
+- deleted NeuralProphet option;
+- added MinMaxModel for modelling long-living items.

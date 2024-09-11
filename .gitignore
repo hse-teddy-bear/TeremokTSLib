@@ -1,7 +1,9 @@
 model_test.ipynb
 minmax_test.ipynb
+minmax_train.ipynb
 catboost_info
 results
+saved_models
 
 __pycache__/
 *.py[cod]

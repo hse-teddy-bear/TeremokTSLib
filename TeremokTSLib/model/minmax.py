@@ -22,6 +22,7 @@ import itertools
 from joblib import Parallel, delayed
 from sklearn.metrics import root_mean_squared_error
 from datetime import datetime
+import pickle
 
 
 # -----------------------------------------------------------------------
@@ -232,7 +233,8 @@ def _plot_results(
     if save_results:
         if not os.path.exists(f"results"):
             os.mkdir(f"results")
-        fig.write_image(f"results/{save_name}.png")
+        #fig.write_image(f"results/{save_name}.png")
+        fig.write_html(f"results/{save_name}.html")
     else:
         fig.show()
 
@@ -526,7 +528,7 @@ class MinMaxModel():
         cons_pred = self.prophet_model.predict(fb_inference_data)['yhat']
         cons_pred = np.round(np.array(cons_pred), 2)
         cons_pred = np.maximum(cons_pred, 0)
-        return cons_pred
+        return np.round(np.array(cons_pred), 2) 
 
     def predict_order(
             self,
@@ -538,7 +540,7 @@ class MinMaxModel():
         data['date'] = pd.to_datetime(data['date'] + pd.DateOffset(days=1)) 
         cons_pred = np.array(self.predict_consumption(data=data))
         cons_pred[cons_pred < 0] = 0
-        data['cons_pred'] = cons_pred
+        data['cons_pred'] = cons_pred 
 
         orders = []
         for index, row in data.iterrows():
@@ -547,12 +549,11 @@ class MinMaxModel():
             stock_floor = max(self.floor_coef * row['cons_pred'] * scaling_factor, self.alltime_mean_cons)
             if row['stock_left'] <= stock_floor:
                 amt_to_replenish = stock_cap - row['stock_left']
-                boxes_to_order = max(round(amt_to_replenish / self.k_coef), 1)
-                order = boxes_to_order * self.k_coef
+                boxes_to_order = np.max(np.round(amt_to_replenish / self.k_coef), 1)
             else:
                 order = 0
             orders.append(order)
-        return np.array(orders)
+        return {"order": boxes_to_order, "cons_pred": cons_pred}
         
     def itertest(
         self,
@@ -582,4 +583,20 @@ class MinMaxModel():
                             save_name=save_name,
                             plot=plot)
         return results
+    
+    def save_model(
+            self, 
+            model_name: str='new_model',
+            foulder_name: str='saved_models',
+    ) -> None:
+        """
+        Saves selected ensemble model in pickle format.
+        """
+        if not os.path.exists(foulder_name):
+            os.mkdir(foulder_name)
+            with open(f'{foulder_name}/{model_name}.pkl', 'wb') as file:
+                pickle.dump(self, file)
+        else:
+            with open(f'{foulder_name}/{model_name}.pkl', 'wb') as file:
+                pickle.dump(self, file)       
         

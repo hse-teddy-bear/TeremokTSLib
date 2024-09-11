@@ -537,23 +537,24 @@ class MinMaxModel():
         """
         Note: date column should contain dates when you predict on TMR date (so the prev date to predict-date).
         """
+        data = data.copy()
         data['date'] = pd.to_datetime(data['date'] + pd.DateOffset(days=1)) 
         cons_pred = np.array(self.predict_consumption(data=data))
         cons_pred[cons_pred < 0] = 0
         data['cons_pred'] = cons_pred 
 
-        orders = []
+        boxes_to_order = []
         for index, row in data.iterrows():
             scaling_factor = np.maximum(0.8, 1 - 0.1 * (row['cons_pred'] / self.alltime_mean_cons - 1))
             stock_cap = max((self.floor_coef * row['cons_pred'] + self.cap_coef * row['cons_pred']) * scaling_factor, self.k_coef)
             stock_floor = max(self.floor_coef * row['cons_pred'] * scaling_factor, self.alltime_mean_cons)
             if row['stock_left'] <= stock_floor:
                 amt_to_replenish = stock_cap - row['stock_left']
-                boxes_to_order = np.max(np.round(amt_to_replenish / self.k_coef), 1)
+                order = np.maximum(np.round(amt_to_replenish / self.k_coef), 1)
             else:
                 order = 0
-            orders.append(order)
-        return {"order": boxes_to_order, "cons_pred": cons_pred}
+            boxes_to_order.append(order)
+        return {"order": np.array(boxes_to_order), "cons_pred": cons_pred}
         
     def itertest(
         self,

@@ -63,3 +63,7 @@ Change Log
 ------------------
 - deleted NeuralProphet option;
 - added MinMaxModel for modelling long-living items.
+
+1.2.3 (11.09.2024)
+------------------
+- added minmax models;

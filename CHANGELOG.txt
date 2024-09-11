@@ -64,6 +64,7 @@ Change Log
 - deleted NeuralProphet option;
 - added MinMaxModel for modelling long-living items.
 
-1.2.3 (11.09.2024)
+1.2.4 (11.09.2024)
 ------------------
 - added minmax models;
+- now output of predict_order method is dict of np arrays;
